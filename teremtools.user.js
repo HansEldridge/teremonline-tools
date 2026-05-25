@@ -217,42 +217,220 @@ console.log('[TeremTools] v6.1 запустился');
     }
 
     // ===== ДЕЙСТВИЯ =====
+    // ---- CRC32 для ZIP ----
+    const CRC_TABLE = (() => {
+        const t = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+            t[n] = c >>> 0;
+        }
+        return t;
+    })();
+    function crc32(uint8) {
+        let c = 0xFFFFFFFF;
+        for (let i = 0; i < uint8.length; i++) {
+            c = CRC_TABLE[(c ^ uint8[i]) & 0xFF] ^ (c >>> 8);
+        }
+        return (c ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    // ---- Сборщик ZIP (метод STORE, без сжатия) ----
+    function buildZip(files) {
+        // files: [{ name: string, data: Uint8Array }]
+        const enc = new TextEncoder();
+        const localParts = [];
+        const centralParts = [];
+        let offset = 0;
+
+        // Дата/время в формате DOS
+        const now = new Date();
+        const dosTime = ((now.getHours() & 0x1F) << 11) |
+                        ((now.getMinutes() & 0x3F) << 5) |
+                        ((now.getSeconds() / 2) & 0x1F);
+        const dosDate = (((now.getFullYear() - 1980) & 0x7F) << 9) |
+                        (((now.getMonth() + 1) & 0x0F) << 5) |
+                        (now.getDate() & 0x1F);
+
+        for (const f of files) {
+            const nameBytes = enc.encode(f.name);
+            const data = f.data;
+            const crc = crc32(data);
+            const size = data.length;
+
+            // --- Local File Header ---
+            const localHeader = new Uint8Array(30 + nameBytes.length);
+            const lh = new DataView(localHeader.buffer);
+            lh.setUint32(0,  0x04034b50, true); // signature
+            lh.setUint16(4,  20, true);         // version needed
+            lh.setUint16(6,  0, true);          // flags
+            lh.setUint16(8,  0, true);          // method = STORE
+            lh.setUint16(10, dosTime, true);
+            lh.setUint16(12, dosDate, true);
+            lh.setUint32(14, crc, true);
+            lh.setUint32(18, size, true);       // compressed size
+            lh.setUint32(22, size, true);       // uncompressed size
+            lh.setUint16(26, nameBytes.length, true);
+            lh.setUint16(28, 0, true);          // extra len
+            localHeader.set(nameBytes, 30);
+
+            localParts.push(localHeader);
+            localParts.push(data);
+
+            // --- Central Directory Header ---
+            const central = new Uint8Array(46 + nameBytes.length);
+            const cd = new DataView(central.buffer);
+            cd.setUint32(0,  0x02014b50, true);
+            cd.setUint16(4,  20, true);
+            cd.setUint16(6,  20, true);
+            cd.setUint16(8,  0, true);
+            cd.setUint16(10, 0, true);
+            cd.setUint16(12, dosTime, true);
+            cd.setUint16(14, dosDate, true);
+            cd.setUint32(16, crc, true);
+            cd.setUint32(20, size, true);
+            cd.setUint32(24, size, true);
+            cd.setUint16(28, nameBytes.length, true);
+            cd.setUint16(30, 0, true);
+            cd.setUint16(32, 0, true);
+            cd.setUint16(34, 0, true);
+            cd.setUint16(36, 0, true);
+            cd.setUint32(38, 0, true);
+            cd.setUint32(42, offset, true);
+            central.set(nameBytes, 46);
+
+            centralParts.push(central);
+            offset += localHeader.length + data.length;
+        }
+
+        const centralStart = offset;
+        let centralSize = 0;
+        for (const c of centralParts) centralSize += c.length;
+
+        const eocd = new Uint8Array(22);
+        const ev = new DataView(eocd.buffer);
+        ev.setUint32(0,  0x06054b50, true);
+        ev.setUint16(4,  0, true);
+        ev.setUint16(6,  0, true);
+        ev.setUint16(8,  files.length, true);
+        ev.setUint16(10, files.length, true);
+        ev.setUint32(12, centralSize, true);
+        ev.setUint32(16, centralStart, true);
+        ev.setUint16(20, 0, true);
+
+        return new Blob([...localParts, ...centralParts, eocd], {
+            type: 'application/zip'
+        });
+    }
+
+    async function blobToUint8(blob) {
+        const buf = await blob.arrayBuffer();
+        return new Uint8Array(buf);
+    }
+
+    // ===== ЗАГРУЗКА ФОТО В ZIP =====
     async function actionDownloadZip() {
-        if (typeof JSZip === 'undefined') { alert('JSZip не загрузился.'); return; }
+        console.log('[TeremTools] ZIP: старт (собственный сборщик)');
+
         const article = getArticleOrAsk();
         const folder = article.replace(/[<>:"/\\|?*]/g, '_');
         const urls = collectPhotoUrls();
+
+        console.log('[TeremTools] ZIP: найдено фото', urls.length);
+
         if (!urls.length) { alert('Нет фото в карусели.'); return; }
         if (!confirm(`Артикул: ${article}\nФото: ${urls.length}\nСобрать ZIP?`)) return;
 
         const btn = document.getElementById('tt-zip-btn');
         const oldText = btn ? btn.textContent : '';
-        if (btn) btn.disabled = true;
-        const zip = new JSZip();
-        const zipFolder = zip.folder(folder);
-        let idx = 1, ok = 0, fail = 0;
-        for (const u of urls) {
-            if (btn) btn.textContent = `⏳ ${idx}/${urls.length}`;
-            try {
-                let res = await fetch(u, { credentials: 'include' });
-                if (!res.ok) throw new Error('http ' + res.status);
-                const srcBlob = await res.blob();
-                let outBlob;
-                try { outBlob = await blobToJpg(srcBlob); } catch { outBlob = srcBlob; }
-                zipFolder.file(`${folder}_${idx}.jpg`, outBlob);
-                ok++;
-            } catch (e) { console.warn('Ошибка', u, e); fail++; }
-            idx++;
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Загрузка...'; }
+
+        const statusToast = document.createElement('div');
+        Object.assign(statusToast.style, {
+            position: 'fixed', top: '20px', right: '20px', zIndex: 1000001,
+            padding: '12px 18px', borderRadius: '8px',
+            background: '#4a90e2', color: '#fff',
+            fontSize: '13px', fontWeight: '600',
+            boxShadow: '0 4px 12px rgba(0,0,0,.2)',
+            minWidth: '200px'
+        });
+        statusToast.textContent = '⏳ Загрузка 0/' + urls.length;
+        document.body.appendChild(statusToast);
+
+        const files = [];
+        let idx = 1, ok = 0;
+
+        try {
+            for (const u of urls) {
+                const txt = `⏳ Загрузка ${idx}/${urls.length}`;
+                if (btn) btn.textContent = txt;
+                statusToast.textContent = txt;
+
+                try {
+                    const controller = new AbortController();
+                    const timeout = setTimeout(() => controller.abort(), 20000);
+                    const res = await fetch(u, {
+                        credentials: 'include',
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeout);
+                    if (!res.ok) throw new Error('http ' + res.status);
+                    const srcBlob = await res.blob();
+                    console.log('[TeremTools] ZIP: скачано', idx, srcBlob.size, 'байт');
+
+                    let outBlob;
+                    try { outBlob = await blobToJpg(srcBlob); }
+                    catch (e) {
+                        console.warn('[TeremTools] ZIP: не смог в JPG, кладу как есть', e);
+                        outBlob = srcBlob;
+                    }
+
+                    const u8 = await blobToUint8(outBlob);
+                    files.push({
+                        name: `${folder}/${folder}_${idx}.jpg`,
+                        data: u8
+                    });
+                    ok++;
+                } catch (e) {
+                    console.warn('[TeremTools] ZIP: ошибка фото', idx, u, e);
+                }
+                idx++;
+            }
+
+            if (!files.length) throw new Error('Не удалось скачать ни одного фото');
+
+            statusToast.textContent = '📦 Собираю архив...';
+            if (btn) btn.textContent = '📦 Собираю...';
+            console.log('[TeremTools] ZIP: собираю архив, файлов', files.length);
+
+            // Даём UI обновиться перед тяжёлой синхронной операцией
+            await new Promise(r => setTimeout(r, 50));
+
+            const zipBlob = buildZip(files);
+            console.log('[TeremTools] ZIP: архив готов', zipBlob.size, 'байт');
+
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(zipBlob);
+            a.download = `${folder}.zip`;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+
+            statusToast.style.background = '#5cb85c';
+            statusToast.textContent = `✓ Готово: ${ok} фото`;
+            console.log('[TeremTools] ZIP: УСПЕХ');
+        } catch (e) {
+            console.error('[TeremTools] ZIP: ОШИБКА', e);
+            statusToast.style.background = '#d9534f';
+            statusToast.textContent = '❌ ' + e.message;
+            alert('Ошибка: ' + e.message);
+        } finally {
+            if (btn) { btn.textContent = oldText || '📦 Скачать ZIP'; btn.disabled = false; }
+            setTimeout(() => {
+                statusToast.style.transition = 'opacity .3s';
+                statusToast.style.opacity = '0';
+                setTimeout(() => statusToast.remove(), 300);
+            }, 3000);
         }
-        if (btn) btn.textContent = '📦 Архивирую...';
-        const zipBlob = await zip.generateAsync({ type: 'blob' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(zipBlob);
-        a.download = `${folder}.zip`;
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-        if (btn) { btn.textContent = oldText; btn.disabled = false; }
-        alert(`Готово!\nВ архиве: ${ok}\nОшибок: ${fail}\nФайл: ${folder}.zip`);
     }
     async function actionCopyLinks() {
         const urls = collectPhotoUrls();
