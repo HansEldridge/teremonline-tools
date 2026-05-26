@@ -633,6 +633,131 @@ console.log('[TeremTools] v6.1 запустился');
         storage.set(NOTES_KEY, all);
     }
 
+        // ===== ХАРАКТЕРИСТИКИ =====
+    function parseProps() {
+        const cont = document.querySelector('.catalog-product-detail__props');
+        if (!cont) return [];
+        const dts = cont.querySelectorAll('dt');
+        const dds = cont.querySelectorAll('dd');
+        const out = [];
+        for (let i = 0; i < dts.length; i++) {
+            const name = (dts[i].innerText || '').trim();
+            const value = (dds[i]?.innerText || '').trim();
+            if (name && value) out.push({ name, value });
+        }
+        return out;
+    }
+
+    function buildPropsSectionLight() {
+        const wrap = document.createElement('div');
+        const props = parseProps();
+
+        if (!props.length) {
+            const msg = document.createElement('div');
+            msg.textContent = 'Нет характеристик';
+            Object.assign(msg.style, {
+                color: '#999', fontSize: '11.5px',
+                textAlign: 'center', padding: '4px'
+            });
+            wrap.appendChild(msg);
+            return wrap;
+        }
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = `Поиск среди ${props.length} характеристик...`;
+        Object.assign(input.style, {
+            width: '100%', padding: '6px 8px', borderRadius: '5px',
+            border: '1px solid #d0d0d0', background: '#fff',
+            color: '#222', fontSize: '12px', outline: 'none',
+            boxSizing: 'border-box', marginBottom: '5px'
+        });
+
+        const results = document.createElement('div');
+        Object.assign(results.style, {
+            display: 'flex', flexDirection: 'column', gap: '3px',
+            maxHeight: '200px', overflowY: 'auto'
+        });
+
+        function render(filter) {
+            results.innerHTML = '';
+            const q = (filter || '').toLowerCase().trim();
+            const list = q
+                ? props.filter(p => p.name.toLowerCase().includes(q) || p.value.toLowerCase().includes(q))
+                : props;
+
+            if (!list.length) {
+                const empty = document.createElement('div');
+                empty.textContent = 'Ничего не найдено';
+                Object.assign(empty.style, {
+                    color: '#aaa', fontSize: '11px',
+                    textAlign: 'center', padding: '6px'
+                });
+                results.appendChild(empty);
+                return;
+            }
+
+            list.forEach(p => {
+                const row = document.createElement('div');
+                Object.assign(row.style, {
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '5px 7px', background: '#fafafa',
+                    border: '1px solid #eee', borderRadius: '5px',
+                    fontSize: '11.5px', cursor: 'pointer',
+                    transition: 'background .12s'
+                });
+                row.onmouseenter = () => row.style.background = '#eef5ff';
+                row.onmouseleave = () => row.style.background = '#fafafa';
+
+                const nm = document.createElement('div');
+                nm.textContent = p.name;
+                Object.assign(nm.style, {
+                    color: '#555', flex: '1', minWidth: 0,
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                });
+
+                const vl = document.createElement('div');
+                vl.textContent = p.value;
+                Object.assign(vl.style, {
+                    color: '#222', fontWeight: '600',
+                    maxWidth: '50%', textAlign: 'right',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                });
+
+                row.title = `Клик — копировать "${p.value}"\nShift+клик — копировать "${p.name}: ${p.value}"`;
+                row.onclick = async (e) => {
+                    const text = e.shiftKey ? `${p.name}: ${p.value}` : p.value;
+                    const ok = await copyToClipboard(text);
+                    if (ok) toast('Скопировано: ' + text.substring(0, 40), 'ok');
+                };
+
+                row.appendChild(nm);
+                row.appendChild(vl);
+                results.appendChild(row);
+            });
+        }
+
+        input.addEventListener('input', () => render(input.value));
+        input.addEventListener('keydown', async (e) => {
+            if (e.key === 'Escape') { input.value = ''; render(''); }
+            else if (e.key === 'Enter') {
+                const q = input.value.toLowerCase().trim();
+                if (!q) return;
+                const found = props.find(p =>
+                    p.name.toLowerCase().includes(q) || p.value.toLowerCase().includes(q));
+                if (found) {
+                    const ok = await copyToClipboard(found.value);
+                    if (ok) toast('Скопировано: ' + found.value, 'ok');
+                }
+            }
+        });
+
+        render('');
+
+        wrap.appendChild(input);
+        wrap.appendChild(results);
+        return wrap;
+    }
     // ===== СВЕТЛЫЕ ВЕРСИИ СЕКЦИЙ =====
 
     function buildCalcSectionLight() {
@@ -1013,6 +1138,10 @@ console.log('[TeremTools] v6.1 запустился');
         text.list.appendChild(mkBtn('tt-name-btn', '📋 Копировать название', '', actionCopyName));
         text.list.appendChild(mkBtn('tt-art-btn',  '🔢 Копировать артикул',  '', actionCopyArticle));
 
+        // 🔎 Характеристики
+        const propsSection = mkSection('🔎 Характеристики', '#5bc0de');
+        propsSection.list.appendChild(buildPropsSectionLight());
+
         // 🧮 Калькулятор
         const calc = mkSection('🧮 Калькулятор', '#f0a04a');
         calc.list.appendChild(buildCalcSectionLight());
@@ -1027,6 +1156,7 @@ console.log('[TeremTools] v6.1 запустился');
 
         panel.appendChild(photo.section);
         panel.appendChild(text.section);
+        panel.appendChild(propsSection.section);
         panel.appendChild(calc.section);
         panel.appendChild(selection.section);
         panel.appendChild(notes.section);
