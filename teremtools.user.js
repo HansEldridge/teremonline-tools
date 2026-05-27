@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Teremonline - Product Tools
 // @namespace    teremtools
-// @version      7.0
-// @description  Инструменты для teremonline.ru: чистый UI, аккордеон, быстрые действия, мини-карточка
+// @version      8.0
+// @description  Инструменты для teremonline.ru: панель, подборка, история, каталог-режим, ресайз, экспорт
 // @match        *://teremonline.ru/*
 // @match        *://*.teremonline.ru/*
 // @grant        GM_setValue
@@ -13,7 +13,7 @@
 // @run-at       document-end
 // ==/UserScript==
 
-console.log('[TeremTools] v7.0 запустился');
+console.log('[TeremTools] v8.0 запустился');
 
 (function () {
     'use strict';
@@ -64,6 +64,7 @@ console.log('[TeremTools] v7.0 запустился');
     }
     function getProductId() { return getArticle() || location.pathname; }
     function getCleanUrl()  { return location.origin + location.pathname; }
+    function isProductPage() { return location.pathname.includes('/product/'); }
 
     function normalizeUnit(raw) {
         if (!raw) return null;
@@ -214,6 +215,13 @@ console.log('[TeremTools] v7.0 запустился');
         requestAnimationFrame(() => t.style.opacity = '1');
         setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2200);
     }
+    function downloadBlob(blob, filename) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }
 
     // ===== CRC32 + ZIP =====
     const CRC_TABLE = (() => {
@@ -358,11 +366,7 @@ console.log('[TeremTools] v7.0 запустился');
             statusToast.textContent = '📦 Собираю архив...';
             await new Promise(r => setTimeout(r, 50));
             const zipBlob = buildZip(files);
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(zipBlob);
-            a.download = `${folder}.zip`;
-            document.body.appendChild(a); a.click(); a.remove();
-            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+            downloadBlob(zipBlob, `${folder}.zip`);
             statusToast.style.background = '#5cb85c';
             statusToast.textContent = `✓ Готово: ${ok} фото`;
         } catch (e) {
@@ -404,12 +408,11 @@ console.log('[TeremTools] v7.0 запустился');
     const SELECTION_KEY = 'selection';
     function getSelection() { return storage.get(SELECTION_KEY, []) || []; }
     function saveSelection(arr) {
-    storage.set(SELECTION_KEY, arr);
-    updateAllBadges();
-    if (typeof window._ttUpdateCounter === 'function') {
-        window._ttUpdateCounter();
+        storage.set(SELECTION_KEY, arr);
+        updateAllBadges();
+        updateSectionCounter('selection', arr.length);
+        refreshCatalogCheckboxes();
     }
-}
     function isInSelection(id) { return getSelection().some(x => x.id === id); }
     function addToSelection() {
         const id = getProductId();
@@ -426,7 +429,6 @@ console.log('[TeremTools] v7.0 запустился');
         toast('Добавлено в подборку ✓', 'ok');
         renderSelectionList();
         updateHeaderCard();
-        // авто-раскрыть подборку при первом добавлении
         if (list.length === 1) expandSection('selection');
     }
     function removeFromSelection(id) {
@@ -466,6 +468,41 @@ console.log('[TeremTools] v7.0 запустился');
         else prompt('Скопируйте вручную:', text);
     }
 
+    // ===== ЭКСПОРТ ПОДБОРКИ =====
+    function exportSelectionCSV() {
+        const list = getSelection();
+        if (!list.length) { toast('Подборка пуста', 'err'); return; }
+        const headers = ['№','Название','Артикул','Цена','За кол-во','Ед.','URL'];
+        const rows = list.map((it, i) => [
+            i + 1, it.name || '', it.article || '',
+            isNaN(it.price) ? '' : it.price,
+            it.unitQty || '', it.unit || '', it.url || ''
+        ]);
+        const escape = (v) => {
+            const s = String(v).replace(/"/g, '""');
+            return /[",;\n]/.test(s) ? `"${s}"` : s;
+        };
+        const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(escape).join(';')).join('\r\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        downloadBlob(blob, `selection_${Date.now()}.csv`);
+        toast('CSV скачан ✓', 'ok');
+    }
+    function exportSelectionJSON() {
+        const list = getSelection();
+        if (!list.length) { toast('Подборка пуста', 'err'); return; }
+        const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+        downloadBlob(blob, `selection_${Date.now()}.json`);
+        toast('JSON скачан ✓', 'ok');
+    }
+    function exportSelectionTXT() {
+        const list = getSelection();
+        if (!list.length) { toast('Подборка пуста', 'err'); return; }
+        const text = list.map(it => it.url).join('\n');
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        downloadBlob(blob, `selection_links_${Date.now()}.txt`);
+        toast('TXT скачан ✓', 'ok');
+    }
+
     // ===== ЗАМЕТКИ =====
     const NOTES_KEY = 'notes';
     function getAllNotes() { return storage.get(NOTES_KEY, {}) || {}; }
@@ -482,6 +519,47 @@ console.log('[TeremTools] v7.0 запустился');
         storage.set(NOTES_KEY, all);
     }
 
+    // ===== ИСТОРИЯ ПРОСМОТРОВ =====
+    const HISTORY_KEY = 'history';
+    const HISTORY_MAX = 20;
+    function getHistory() { return storage.get(HISTORY_KEY, []) || []; }
+    function saveHistory(arr) { storage.set(HISTORY_KEY, arr); }
+    function pushHistory() {
+        if (!isProductPage()) return;
+        const id = getProductId();
+        const name = getProductName();
+        if (!name) return;
+        let list = getHistory().filter(x => x.id !== id);
+        list.unshift({
+            id, name, article: getArticle() || '',
+            url: getCleanUrl(), visitedAt: Date.now()
+        });
+        if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX);
+        saveHistory(list);
+    }
+    function removeFromHistory(id) {
+        saveHistory(getHistory().filter(x => x.id !== id));
+        renderHistoryList();
+    }
+    function clearHistory() {
+        if (!confirm('Очистить всю историю?')) return;
+        saveHistory([]);
+        renderHistoryList();
+        toast('История очищена', 'ok');
+    }
+    function formatHistoryTime(ts) {
+        const diff = Date.now() - ts;
+        const min = Math.floor(diff / 60000);
+        if (min < 1) return 'сейчас';
+        if (min < 60) return min + 'м';
+        const hr = Math.floor(min / 60);
+        if (hr < 24) return hr + 'ч';
+        const d = Math.floor(hr / 24);
+        if (d < 7) return d + 'д';
+        const dt = new Date(ts);
+        return dt.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    }
+
     // ===== ХАРАКТЕРИСТИКИ =====
     function parseProps() {
         const cont = document.querySelector('.catalog-product-detail__props');
@@ -496,30 +574,24 @@ console.log('[TeremTools] v7.0 запустился');
         }
         return out;
     }
-    // Видны ли характеристики прямо в карточке товара (вкладка активна)
     function arePropsVisibleOnPage() {
         const cont = document.querySelector('.catalog-product-detail__props');
         if (!cont) return false;
         const rect = cont.getBoundingClientRect();
-        // Считаем "видны", если контейнер существует и имеет высоту
         return rect.height > 50;
     }
 
     // ===== СЕКЦИИ КОНТЕНТА =====
-
     function buildPropsContent() {
         const wrap = document.createElement('div');
         const props = parseProps();
         if (!props.length) {
             const msg = document.createElement('div');
             msg.textContent = 'Нет характеристик';
-            Object.assign(msg.style, {
-                color: '#999', fontSize: '11.5px', textAlign: 'center', padding: '4px'
-            });
+            Object.assign(msg.style, { color: '#999', fontSize: '11.5px', textAlign: 'center', padding: '4px' });
             wrap.appendChild(msg);
             return wrap;
         }
-
         const input = document.createElement('input');
         input.type = 'text';
         input.placeholder = `Поиск среди ${props.length} характеристик...`;
@@ -529,13 +601,11 @@ console.log('[TeremTools] v7.0 запустился');
             color: '#222', fontSize: '12px', outline: 'none',
             boxSizing: 'border-box', marginBottom: '6px'
         });
-
         const results = document.createElement('div');
         Object.assign(results.style, {
             display: 'flex', flexDirection: 'column', gap: '2px',
             maxHeight: '220px', overflowY: 'auto'
         });
-
         function render(filter) {
             results.innerHTML = '';
             const q = (filter || '').toLowerCase().trim();
@@ -544,9 +614,7 @@ console.log('[TeremTools] v7.0 запустился');
             if (!list.length) {
                 const empty = document.createElement('div');
                 empty.textContent = 'Ничего не найдено';
-                Object.assign(empty.style, {
-                    color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '6px'
-                });
+                Object.assign(empty.style, { color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '6px' });
                 results.appendChild(empty);
                 return;
             }
@@ -555,8 +623,7 @@ console.log('[TeremTools] v7.0 запустился');
                 Object.assign(row.style, {
                     display: 'flex', alignItems: 'center', gap: '6px',
                     padding: '5px 7px', borderRadius: '4px',
-                    fontSize: '11.5px', cursor: 'pointer',
-                    transition: 'background .12s'
+                    fontSize: '11.5px', cursor: 'pointer', transition: 'background .12s'
                 });
                 row.onmouseenter = () => row.style.background = '#f0f5fb';
                 row.onmouseleave = () => row.style.background = 'transparent';
@@ -569,8 +636,7 @@ console.log('[TeremTools] v7.0 запустился');
                 const vl = document.createElement('div');
                 vl.textContent = p.value;
                 Object.assign(vl.style, {
-                    color: '#222', fontWeight: '600',
-                    maxWidth: '50%', textAlign: 'right',
+                    color: '#222', fontWeight: '600', maxWidth: '50%', textAlign: 'right',
                     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
                 });
                 row.title = `Клик — копировать значение\nShift+клик — копировать имя: значение`;
@@ -579,8 +645,7 @@ console.log('[TeremTools] v7.0 запустился');
                     const ok = await copyToClipboard(text);
                     if (ok) toast('Скопировано: ' + text.substring(0, 40), 'ok');
                 };
-                row.appendChild(nm);
-                row.appendChild(vl);
+                row.appendChild(nm); row.appendChild(vl);
                 results.appendChild(row);
             });
         }
@@ -610,9 +675,7 @@ console.log('[TeremTools] v7.0 запустился');
         if (isNaN(info.price)) {
             const msg = document.createElement('div');
             msg.textContent = 'Цена не распознана';
-            Object.assign(msg.style, {
-                color: '#999', fontSize: '12px', textAlign: 'center', padding: '4px'
-            });
+            Object.assign(msg.style, { color: '#999', fontSize: '12px', textAlign: 'center', padding: '4px' });
             wrap.appendChild(msg);
             return wrap;
         }
@@ -626,7 +689,6 @@ console.log('[TeremTools] v7.0 запустился');
                 <b style="color:#2a8a2a;">${formatMoney(perUnit)}</b><span style="color:#999;"> / ${unit}</span>
              </div>`;
         wrap.appendChild(infoLine);
-
         const row = document.createElement('div');
         Object.assign(row.style, {
             display: 'flex', alignItems: 'center', gap: '8px',
@@ -638,8 +700,7 @@ console.log('[TeremTools] v7.0 запустился');
         Object.assign(input.style, {
             width: '70px', padding: '5px 7px', borderRadius: '5px',
             border: '1px solid #d8d8d8', background: '#fff',
-            color: '#222', fontSize: '13px', fontWeight: '600', textAlign: 'right',
-            outline: 'none'
+            color: '#222', fontSize: '13px', fontWeight: '600', textAlign: 'right', outline: 'none'
         });
         const unitLbl = document.createElement('div');
         unitLbl.textContent = unit;
@@ -649,8 +710,7 @@ console.log('[TeremTools] v7.0 запустился');
         Object.assign(eq.style, { color: '#bbb', fontSize: '13px' });
         const result = document.createElement('div');
         Object.assign(result.style, {
-            color: '#2a8a2a', fontSize: '14px', fontWeight: 'bold',
-            flex: '1', textAlign: 'right'
+            color: '#2a8a2a', fontSize: '14px', fontWeight: 'bold', flex: '1', textAlign: 'right'
         });
         const recalc = () => {
             const qty = parseFloat((input.value || '0').replace(',', '.'));
@@ -665,15 +725,18 @@ console.log('[TeremTools] v7.0 запустился');
         return wrap;
     }
 
+    // ===== ПОДБОРКА (UI) =====
     function buildSelectionContent() {
         const wrap = document.createElement('div');
         Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '6px' });
 
-        const addBtn = document.createElement('button');
-        addBtn.id = 'tt-sel-add-btn';
-        addBtn.className = 'tt-btn success';
-        Object.assign(addBtn.style, { textAlign: 'center' });
-        wrap.appendChild(addBtn);
+        if (isProductPage()) {
+            const addBtn = document.createElement('button');
+            addBtn.id = 'tt-sel-add-btn';
+            addBtn.className = 'tt-btn success';
+            Object.assign(addBtn.style, { textAlign: 'center' });
+            wrap.appendChild(addBtn);
+        }
 
         const list = document.createElement('div');
         list.id = 'tt-sel-list';
@@ -684,19 +747,68 @@ console.log('[TeremTools] v7.0 запустился');
         wrap.appendChild(list);
 
         const actions = document.createElement('div');
-        Object.assign(actions.style, { display: 'flex', gap: '6px' });
+                Object.assign(actions.style, { display: 'flex', gap: '6px' });
+
         const copyBtn = document.createElement('button');
-        copyBtn.textContent = '📋 Скопировать список';
+        copyBtn.textContent = '📋 Скопировать';
         copyBtn.className = 'tt-btn primary';
         copyBtn.style.flex = '1';
         copyBtn.style.textAlign = 'center';
         copyBtn.onclick = actionCopySelection;
+
+        const exportBtn = document.createElement('button');
+        exportBtn.textContent = '📤';
+        exportBtn.title = 'Экспорт';
+        exportBtn.className = 'tt-btn';
+        exportBtn.style.textAlign = 'center';
+
+                const exportMenu = document.createElement('div');
+        Object.assign(exportMenu.style, {
+            position: 'absolute', bottom: 'calc(100% + 4px)', right: '0',
+            background: '#fff', border: '1px solid #e0e0e0',
+            borderRadius: '6px', boxShadow: '0 4px 12px rgba(0,0,0,.15)',
+            padding: '4px', display: 'none', zIndex: '100',
+            minWidth: '150px', flexDirection: 'column', gap: '2px'
+        });
+        const mkExportItem = (label, fn) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            Object.assign(b.style, {
+                background: 'transparent', border: 'none',
+                padding: '7px 10px', textAlign: 'left',
+                fontSize: '12px', cursor: 'pointer',
+                borderRadius: '4px', color: '#333',
+                fontFamily: 'inherit'
+            });
+            b.onmouseenter = () => b.style.background = '#f0f5fb';
+            b.onmouseleave = () => b.style.background = 'transparent';
+            b.onclick = () => { exportMenu.style.display = 'none'; fn(); };
+            return b;
+        };
+        exportMenu.appendChild(mkExportItem('📄 CSV (Excel)', exportSelectionCSV));
+        exportMenu.appendChild(mkExportItem('🔧 JSON', exportSelectionJSON));
+        exportMenu.appendChild(mkExportItem('🔗 TXT (ссылки)', exportSelectionTXT));
+
+        exportBtn.onclick = (e) => {
+            e.stopPropagation();
+            exportMenu.style.display = exportMenu.style.display === 'flex' ? 'none' : 'flex';
+        };
+        document.addEventListener('click', () => { exportMenu.style.display = 'none'; });
+
         const clearBtn = document.createElement('button');
         clearBtn.textContent = '🗑';
         clearBtn.className = 'tt-btn danger';
         clearBtn.style.textAlign = 'center';
         clearBtn.onclick = clearSelection;
+
+                // Обёртка для кнопки экспорта + меню (для правильного позиционирования)
+        const exportWrap = document.createElement('div');
+        Object.assign(exportWrap.style, { position: 'relative', display: 'flex' });
+        exportWrap.appendChild(exportBtn);
+        exportWrap.appendChild(exportMenu);
+
         actions.appendChild(copyBtn);
+        actions.appendChild(exportWrap);
         actions.appendChild(clearBtn);
         wrap.appendChild(actions);
         return wrap;
@@ -711,8 +823,7 @@ console.log('[TeremTools] v7.0 запустился');
             const empty = document.createElement('div');
             empty.textContent = 'Подборка пуста';
             Object.assign(empty.style, {
-                color: '#aaa', fontSize: '11px',
-                textAlign: 'center', padding: '8px'
+                color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '8px'
             });
             cont.appendChild(empty);
             updateSelectionButton();
@@ -723,8 +834,7 @@ console.log('[TeremTools] v7.0 запустился');
             Object.assign(row.style, {
                 display: 'flex', alignItems: 'center', gap: '6px',
                 padding: '5px 6px', borderRadius: '4px',
-                fontSize: '11.5px', color: '#222',
-                transition: 'background .12s'
+                fontSize: '11.5px', color: '#222', transition: 'background .12s'
             });
             row.onmouseenter = () => row.style.background = '#f5f5f5';
             row.onmouseleave = () => row.style.background = 'transparent';
@@ -753,13 +863,10 @@ console.log('[TeremTools] v7.0 запустился');
             del.textContent = '✕';
             Object.assign(del.style, {
                 background: 'transparent', border: 'none', color: '#c44',
-                cursor: 'pointer', fontSize: '13px', padding: '0 4px',
-                fontWeight: 'bold'
+                cursor: 'pointer', fontSize: '13px', padding: '0 4px', fontWeight: 'bold'
             });
             del.onclick = () => removeFromSelection(item.id);
-            row.appendChild(num);
-            row.appendChild(info);
-            row.appendChild(del);
+            row.appendChild(num); row.appendChild(info); row.appendChild(del);
             cont.appendChild(row);
         });
         updateSelectionButton();
@@ -782,6 +889,78 @@ console.log('[TeremTools] v7.0 запустился');
         }
     }
 
+    // ===== ИСТОРИЯ (UI) =====
+    function buildHistoryContent() {
+        const wrap = document.createElement('div');
+        Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '6px' });
+
+        const list = document.createElement('div');
+        list.id = 'tt-hist-list';
+        Object.assign(list.style, {
+            display: 'flex', flexDirection: 'column', gap: '2px',
+            maxHeight: '240px', overflowY: 'auto'
+        });
+        wrap.appendChild(list);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = '🗑 Очистить историю';
+        clearBtn.className = 'tt-btn danger';
+        clearBtn.style.textAlign = 'center';
+        clearBtn.onclick = clearHistory;
+        wrap.appendChild(clearBtn);
+        return wrap;
+    }
+
+    function renderHistoryList() {
+        const cont = document.getElementById('tt-hist-list');
+        if (!cont) return;
+        const list = getHistory();
+        cont.innerHTML = '';
+        if (!list.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'История пуста';
+            Object.assign(empty.style, {
+                color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '8px'
+            });
+            cont.appendChild(empty);
+            return;
+        }
+        list.forEach(item => {
+            const row = document.createElement('div');
+            Object.assign(row.style, {
+                display: 'flex', alignItems: 'center', gap: '6px',
+                padding: '5px 6px', borderRadius: '4px',
+                fontSize: '11.5px', transition: 'background .12s'
+            });
+            row.onmouseenter = () => row.style.background = '#f5f5f5';
+            row.onmouseleave = () => row.style.background = 'transparent';
+            const info = document.createElement('div');
+            Object.assign(info.style, { flex: '1', minWidth: 0, overflow: 'hidden' });
+            const nm = document.createElement('a');
+            nm.href = item.url;
+            nm.textContent = item.name || 'Без названия';
+            Object.assign(nm.style, {
+                color: '#2a5db0', textDecoration: 'none', display: 'block',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                fontWeight: '600'
+            });
+            const meta = document.createElement('div');
+            meta.textContent = (item.article ? item.article + ' · ' : '') + formatHistoryTime(item.visitedAt);
+            Object.assign(meta.style, { color: '#999', fontSize: '10.5px' });
+            info.appendChild(nm); info.appendChild(meta);
+            const del = document.createElement('button');
+            del.textContent = '✕';
+            Object.assign(del.style, {
+                background: 'transparent', border: 'none', color: '#c44',
+                cursor: 'pointer', fontSize: '13px', padding: '0 4px', fontWeight: 'bold'
+            });
+            del.onclick = () => removeFromHistory(item.id);
+            row.appendChild(info); row.appendChild(del);
+            cont.appendChild(row);
+        });
+    }
+
+    // ===== ЗАМЕТКИ (UI) =====
     function buildNotesContent() {
         const wrap = document.createElement('div');
         Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '4px' });
@@ -795,8 +974,7 @@ console.log('[TeremTools] v7.0 запустился');
         Object.assign(ta.style, {
             width: '100%', minHeight: '60px', maxHeight: '180px',
             padding: '7px', borderRadius: '5px',
-            border: '1px solid #d8d8d8',
-            background: '#fff', color: '#222',
+            border: '1px solid #d8d8d8', background: '#fff', color: '#222',
             fontSize: '12px', fontFamily: 'inherit', resize: 'vertical',
             outline: 'none', boxSizing: 'border-box'
         });
@@ -831,11 +1009,9 @@ console.log('[TeremTools] v7.0 запустился');
         return wrap;
     }
 
-    // ===== СОСТОЯНИЕ АККОРДЕОНА =====
+    // ===== АККОРДЕОН =====
     const ACCORDION_KEY = 'accordionState';
-    function getAccordionState() {
-        return storage.get(ACCORDION_KEY, {}) || {};
-    }
+    function getAccordionState() { return storage.get(ACCORDION_KEY, {}) || {}; }
     function setSectionOpen(id, open) {
         const s = getAccordionState();
         s[id] = open;
@@ -858,6 +1034,198 @@ console.log('[TeremTools] v7.0 запустился');
         }
     }
 
+    // ===== КАТАЛОГ-РЕЖИМ =====
+    function findCatalogCards() {
+        // Ищем ссылки на /product/ — карточки товаров в каталоге
+        const links = Array.from(document.querySelectorAll('a[href*="/product/"]'));
+        const cards = new Map(); // элемент -> {url, name}
+        for (const a of links) {
+            // Поднимаемся к "карточке" (контейнер с картинкой)
+            let card = a;
+            for (let i = 0; i < 5 && card.parentElement; i++) {
+                if (card.querySelector('img')) break;
+                card = card.parentElement;
+            }
+            // Берём ближайший общий родитель с img
+            let host = a;
+            for (let i = 0; i < 6 && host.parentElement; i++) {
+                if (host.querySelector('img')) break;
+                host = host.parentElement;
+            }
+            if (!host.querySelector('img')) continue;
+            const rect = host.getBoundingClientRect();
+            if (rect.width < 80 || rect.height < 80) continue;
+            const url = a.href.split('?')[0].split('#')[0];
+            if (cards.has(host)) continue;
+            // Имя — текст ссылки или alt картинки
+            let name = (a.innerText || '').trim();
+            if (!name) {
+                const img = host.querySelector('img');
+                name = (img?.alt || '').trim();
+            }
+            cards.set(host, { url, name, link: a });
+        }
+        return Array.from(cards.entries()).map(([el, data]) => ({ el, ...data }));
+    }
+
+    function shouldEnableCatalogMode() {
+        if (isProductPage()) return false;
+        return findCatalogCards().length >= 3;
+    }
+
+    function makeCatalogId(url) {
+        // ID = последняя значимая часть URL
+        try {
+            const u = new URL(url);
+            const parts = u.pathname.split('/').filter(Boolean);
+            return parts[parts.length - 1] || url;
+        } catch { return url; }
+    }
+
+    function refreshCatalogCheckboxes() {
+        const cbs = document.querySelectorAll('.tt-catalog-cb');
+        const sel = getSelection();
+        cbs.forEach(cb => {
+            const id = cb.dataset.ttId;
+            const inSel = sel.some(x => x.id === id);
+            cb.classList.toggle('tt-cb-checked', inSel);
+            cb.textContent = inSel ? '✓' : '';
+        });
+        updateCatalogToolbar();
+    }
+
+    function updateCatalogToolbar() {
+        const tb = document.getElementById('tt-cat-toolbar');
+        if (!tb) return;
+        const cbs = document.querySelectorAll('.tt-catalog-cb.tt-cb-checked');
+        const visibleCbs = document.querySelectorAll('.tt-catalog-cb');
+        const count = cbs.length;
+        const countEl = tb.querySelector('.tt-cat-count');
+        if (countEl) countEl.textContent = count;
+        tb.style.display = visibleCbs.length > 0 ? 'flex' : 'none';
+    }
+
+    function injectCatalogCheckboxes() {
+        if (!shouldEnableCatalogMode()) return;
+        const cards = findCatalogCards();
+        if (!cards.length) return;
+        const sel = getSelection();
+        cards.forEach(card => {
+            if (card.el.querySelector('.tt-catalog-cb')) return;
+            const id = makeCatalogId(card.url);
+            const cb = document.createElement('div');
+            cb.className = 'tt-catalog-cb';
+            cb.dataset.ttId = id;
+            cb.dataset.ttUrl = card.url;
+            cb.dataset.ttName = card.name;
+            const inSel = sel.some(x => x.id === id);
+            if (inSel) {
+                cb.classList.add('tt-cb-checked');
+                cb.textContent = '✓';
+            }
+            cb.title = 'Добавить/убрать из подборки';
+            cb.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleCatalogItem(cb);
+            };
+            // Делаем родителя relative, чтобы absolute-чекбокс позиционировался
+            const cs = getComputedStyle(card.el);
+            if (cs.position === 'static') card.el.style.position = 'relative';
+            card.el.appendChild(cb);
+        });
+        updateCatalogToolbar();
+    }
+
+    function toggleCatalogItem(cb) {
+        const id = cb.dataset.ttId;
+        const url = cb.dataset.ttUrl;
+        const name = cb.dataset.ttName || 'Товар';
+        const list = getSelection();
+        const idx = list.findIndex(x => x.id === id);
+        if (idx >= 0) {
+            list.splice(idx, 1);
+            saveSelection(list);
+            renderSelectionList();
+        } else {
+            list.push({
+                id, name, article: '',
+                url, photo: '',
+                price: NaN, unitQty: 1, unit: '',
+                addedAt: Date.now()
+            });
+            saveSelection(list);
+            renderSelectionList();
+        }
+    }
+
+    function selectAllCatalog() {
+        const cbs = Array.from(document.querySelectorAll('.tt-catalog-cb:not(.tt-cb-checked)'));
+        if (!cbs.length) { toast('Все уже выбраны', 'ok'); return; }
+        const list = getSelection();
+        cbs.forEach(cb => {
+            const id = cb.dataset.ttId;
+            if (list.some(x => x.id === id)) return;
+            list.push({
+                id,
+                name: cb.dataset.ttName || 'Товар',
+                article: '',
+                url: cb.dataset.ttUrl,
+                photo: '', price: NaN, unitQty: 1, unit: '',
+                addedAt: Date.now()
+            });
+        });
+        saveSelection(list);
+        renderSelectionList();
+        toast(`Добавлено: ${cbs.length}`, 'ok');
+    }
+
+    function deselectAllCatalog() {
+        const cbs = Array.from(document.querySelectorAll('.tt-catalog-cb.tt-cb-checked'));
+        if (!cbs.length) return;
+        const ids = new Set(cbs.map(cb => cb.dataset.ttId));
+        const list = getSelection().filter(x => !ids.has(x.id));
+        saveSelection(list);
+        renderSelectionList();
+        toast(`Снято: ${cbs.length}`, 'ok');
+    }
+
+    function createCatalogToolbar() {
+        if (document.getElementById('tt-cat-toolbar')) return;
+        const tb = document.createElement('div');
+        tb.id = 'tt-cat-toolbar';
+        Object.assign(tb.style, {
+            position: 'fixed', bottom: '20px', left: '20px',
+            zIndex: 999998, display: 'none',
+            alignItems: 'center', gap: '8px',
+            background: '#fff', padding: '8px 12px',
+            borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,.15)',
+            border: '1px solid #e0e0e0', fontSize: '12px'
+        });
+        const label = document.createElement('div');
+        label.innerHTML = 'Выбрано: <b class="tt-cat-count" style="color:#5cb85c;">0</b>';
+        Object.assign(label.style, { color: '#333', marginRight: '4px' });
+
+        const selAll = document.createElement('button');
+        selAll.textContent = '☑ Все';
+        selAll.className = 'tt-btn primary';
+        selAll.style.padding = '5px 10px';
+        selAll.style.fontSize = '11.5px';
+        selAll.onclick = selectAllCatalog;
+
+        const desAll = document.createElement('button');
+        desAll.textContent = '☐ Снять';
+        desAll.className = 'tt-btn';
+        desAll.style.padding = '5px 10px';
+        desAll.style.fontSize = '11.5px';
+        desAll.onclick = deselectAllCatalog;
+
+        tb.appendChild(label);
+        tb.appendChild(selAll);
+        tb.appendChild(desAll);
+        document.body.appendChild(tb);
+    }
+
     // ===== СТИЛИ =====
     function injectGlobalStyles() {
         if (document.getElementById('tt-style-main')) return;
@@ -865,13 +1233,16 @@ console.log('[TeremTools] v7.0 запустился');
         st.id = 'tt-style-main';
         st.textContent = `
             html.tt-shifted body {
-                margin-right: 260px !important;
+                margin-right: var(--tt-panel-w, 260px) !important;
                 transition: margin-right .2s ease;
             }
             html.tt-rail-mode body {
                 margin-right: 48px !important;
                 transition: margin-right .2s ease;
             }
+            html.tt-resizing body { transition: none !important; }
+            html.tt-resizing { user-select: none; cursor: ew-resize; }
+
             #tt-panel, #tt-rail {
                 font-family: system-ui, -apple-system, sans-serif;
                 color: #2b2b2b;
@@ -880,14 +1251,21 @@ console.log('[TeremTools] v7.0 запустился');
             #tt-panel input[type=number]::-webkit-inner-spin-button {
                 -webkit-appearance: none; margin: 0;
             }
-            #tt-panel input[type=number] {
-                -moz-appearance: textfield; appearance: textfield;
-            }
+            #tt-panel input[type=number] { -moz-appearance: textfield; appearance: textfield; }
             #tt-panel ::-webkit-scrollbar { width: 6px; }
-            #tt-panel ::-webkit-scrollbar-thumb {
-                background: #d0d0d0; border-radius: 3px;
-            }
+            #tt-panel ::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
             #tt-panel ::-webkit-scrollbar-thumb:hover { background: #b0b0b0; }
+
+            /* Ресайзер */
+            #tt-resizer {
+                position: absolute; top: 0; left: -3px;
+                width: 6px; height: 100%; cursor: ew-resize;
+                z-index: 5; background: transparent;
+                transition: background .15s;
+            }
+            #tt-resizer:hover, #tt-resizer.tt-active {
+                background: rgba(74,144,226,.35);
+            }
 
             .tt-btn {
                 padding: 7px 10px; border: 1px solid #d8d8d8;
@@ -915,11 +1293,8 @@ console.log('[TeremTools] v7.0 запустился');
                 transition: background .12s, border-color .12s;
                 font-family: inherit; padding: 0;
             }
-            .tt-rail-btn:hover {
-                background: #f0f5fb; border-color: #4a90e2;
-            }
+            .tt-rail-btn:hover { background: #f0f5fb; border-color: #4a90e2; }
 
-            /* Быстрые действия — иконки в шапке */
             .tt-quick-btn {
                 width: 32px; height: 32px;
                 display: flex; align-items: center; justify-content: center;
@@ -929,17 +1304,10 @@ console.log('[TeremTools] v7.0 запустился');
                 padding: 0; font-family: inherit;
                 flex: 1; min-width: 0;
             }
-            .tt-quick-btn:hover {
-                background: #f0f5fb; border-color: #4a90e2;
-            }
-            .tt-quick-btn:disabled {
-                opacity: .4; cursor: not-allowed;
-            }
+            .tt-quick-btn:hover { background: #f0f5fb; border-color: #4a90e2; }
+            .tt-quick-btn:disabled { opacity: .4; cursor: not-allowed; }
 
-            /* Секции аккордеона */
-            .tt-section {
-                border-bottom: 1px solid #eee;
-            }
+            .tt-section { border-bottom: 1px solid #eee; }
             .tt-section:last-child { border-bottom: none; }
             .tt-sec-head {
                 display: flex; align-items: center; justify-content: space-between;
@@ -951,25 +1319,18 @@ console.log('[TeremTools] v7.0 запустился');
                 font-size: 12px; font-weight: 600; color: #333;
                 display: flex; align-items: center; gap: 6px;
             }
-            .tt-sec-arrow {
-                color: #aaa; font-size: 10px; transition: transform .15s;
-            }
+            .tt-sec-arrow { color: #aaa; font-size: 10px; transition: transform .15s; }
             .tt-sec-counter {
                 background: #5cb85c; color: #fff;
                 font-size: 10px; font-weight: bold;
                 padding: 1px 6px; border-radius: 8px;
                 min-width: 16px; text-align: center; line-height: 1.3;
             }
-            .tt-sec-body {
-                padding: 4px 4px 10px 4px;
-            }
+            .tt-sec-body { padding: 4px 4px 10px 4px; }
 
-            /* Мини-карточка товара */
             .tt-mini-card {
-                padding: 8px 10px;
-                background: #f7f9fc;
-                border-radius: 6px;
-                margin-bottom: 8px;
+                padding: 8px 10px; background: #f7f9fc;
+                border-radius: 6px; margin-bottom: 8px;
                 border-left: 3px solid #4a90e2;
             }
             .tt-mini-name {
@@ -985,6 +1346,26 @@ console.log('[TeremTools] v7.0 запустился');
                 flex-wrap: wrap;
             }
             .tt-mini-meta b { color: #2a8a2a; font-size: 11px; }
+
+            /* Каталог-чекбоксы */
+            .tt-catalog-cb {
+                position: absolute; top: 8px; left: 8px;
+                width: 24px; height: 24px;
+                background: rgba(255,255,255,.95);
+                border: 2px solid #c0c0c0;
+                border-radius: 5px;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 14px; font-weight: bold; color: #fff;
+                cursor: pointer; z-index: 100;
+                box-shadow: 0 1px 4px rgba(0,0,0,.15);
+                transition: all .12s; user-select: none;
+            }
+            .tt-catalog-cb:hover {
+                border-color: #4a90e2; transform: scale(1.1);
+            }
+            .tt-catalog-cb.tt-cb-checked {
+                background: #5cb85c; border-color: #5cb85c;
+            }
         `;
         document.head.appendChild(st);
     }
@@ -993,11 +1374,7 @@ console.log('[TeremTools] v7.0 запустился');
     function updateHeaderCard() {
         const card = document.getElementById('tt-mini-card');
         if (!card) return;
-        const isProduct = location.pathname.includes('/product/');
-        if (!isProduct) {
-            card.style.display = 'none';
-            return;
-        }
+        if (!isProductPage()) { card.style.display = 'none'; return; }
         card.style.display = 'block';
         const name = getProductName();
         const article = getArticle();
@@ -1014,11 +1391,9 @@ console.log('[TeremTools] v7.0 запустился');
             if (article) parts.push(`<span>${article}</span>`);
             if (!isNaN(info.price)) parts.push(`<b>${formatMoney(info.price)}</b>`);
             if (inSel) parts.push(`<span style="color:#5cb85c;">${inSel} в подборке</span>`);
-                        if (noteFlag) parts.push(`<span title="Есть заметка">${noteFlag}</span>`);
+            if (noteFlag) parts.push(`<span title="Есть заметка">${noteFlag}</span>`);
             metaEl.innerHTML = parts.join('<span style="color:#ccc;">·</span>');
         }
-
-        // Обновляем счётчик подборки в шапке
         const headerCounter = document.getElementById('tt-header-sel-count');
         if (headerCounter) {
             headerCounter.textContent = selCount;
@@ -1027,7 +1402,6 @@ console.log('[TeremTools] v7.0 запустился');
     }
 
     function updateAllBadges() {
-        // Rail-режим: значок на иконке подборки
         const railBadge = document.getElementById('tt-rail-badge');
         if (railBadge) {
             const n = getSelection().length;
@@ -1037,22 +1411,18 @@ console.log('[TeremTools] v7.0 запустился');
         updateHeaderCard();
     }
 
-    // ===== ПОСТРОЕНИЕ СЕКЦИИ АККОРДЕОНА =====
+    // ===== СЕКЦИЯ-БИЛДЕР =====
     function buildSection(id, icon, title, contentBuilder, opts = {}) {
         const section = document.createElement('div');
         section.className = 'tt-section';
         section.dataset.ttSection = id;
-
         const head = document.createElement('div');
         head.className = 'tt-sec-head';
-
         const titleEl = document.createElement('div');
         titleEl.className = 'tt-sec-title';
         const titleText = document.createElement('span');
         titleText.textContent = `${icon} ${title}`;
         titleEl.appendChild(titleText);
-
-        // Опциональный счётчик (для подборки)
         if (opts.counter) {
             const counter = document.createElement('span');
             counter.className = 'tt-sec-counter';
@@ -1060,18 +1430,13 @@ console.log('[TeremTools] v7.0 запустился');
             counter.style.display = 'none';
             titleEl.appendChild(counter);
         }
-
         const arrow = document.createElement('span');
         arrow.className = 'tt-sec-arrow';
         arrow.textContent = '▾';
-
         head.appendChild(titleEl);
         head.appendChild(arrow);
-
         const body = document.createElement('div');
         body.className = 'tt-sec-body';
-
-        // Ленивая инициализация контента
         let contentBuilt = false;
         const buildContent = () => {
             if (contentBuilt) return;
@@ -1079,7 +1444,6 @@ console.log('[TeremTools] v7.0 запустился');
             body.appendChild(content);
             contentBuilt = true;
         };
-
         const setOpen = (open) => {
             if (open) {
                 buildContent();
@@ -1091,16 +1455,13 @@ console.log('[TeremTools] v7.0 запустился');
             }
             setSectionOpen(id, open);
         };
-
         const defaultOpen = opts.defaultOpen !== false;
         const initialOpen = isSectionOpen(id, defaultOpen);
         setOpen(initialOpen);
-
         head.onclick = () => {
             const isOpen = body.style.display !== 'none';
             setOpen(!isOpen);
         };
-
         section.appendChild(head);
         section.appendChild(body);
         return section;
@@ -1117,6 +1478,60 @@ console.log('[TeremTools] v7.0 запустился');
         }
     }
 
+    // ===== РЕСАЙЗ =====
+    const PANEL_W_KEY = 'panelWidth';
+    const PANEL_W_MIN = 240;
+    const PANEL_W_MAX = 600;
+    function getPanelWidth() {
+        const w = storage.get(PANEL_W_KEY, 260);
+        const n = parseInt(w, 10);
+        if (isNaN(n)) return 260;
+        return Math.max(PANEL_W_MIN, Math.min(PANEL_W_MAX, n));
+    }
+    function applyPanelWidth(w) {
+        w = Math.max(PANEL_W_MIN, Math.min(PANEL_W_MAX, w));
+        const panel = document.getElementById('tt-panel');
+        if (panel) panel.style.width = w + 'px';
+        document.documentElement.style.setProperty('--tt-panel-w', w + 'px');
+        return w;
+    }
+    function setupResizer(panel) {
+        const resizer = document.createElement('div');
+        resizer.id = 'tt-resizer';
+        panel.appendChild(resizer);
+        let startX = 0, startW = 0, dragging = false;
+        const onMove = (e) => {
+            if (!dragging) return;
+            const dx = startX - e.clientX;
+            const newW = startW + dx;
+            applyPanelWidth(newW);
+        };
+        const onUp = () => {
+            if (!dragging) return;
+            dragging = false;
+            resizer.classList.remove('tt-active');
+            document.documentElement.classList.remove('tt-resizing');
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            const w = parseInt(panel.style.width, 10);
+            if (!isNaN(w)) storage.set(PANEL_W_KEY, w);
+        };
+        resizer.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            dragging = true;
+            startX = e.clientX;
+            startW = panel.offsetWidth;
+            resizer.classList.add('tt-active');
+            document.documentElement.classList.add('tt-resizing');
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+        resizer.addEventListener('dblclick', () => {
+            applyPanelWidth(260);
+            storage.set(PANEL_W_KEY, 260);
+        });
+    }
+
     // ===== ПАНЕЛЬ =====
     let showPanel, hidePanel;
 
@@ -1124,7 +1539,9 @@ console.log('[TeremTools] v7.0 запустился');
         if (document.getElementById('tt-panel') || document.getElementById('tt-rail')) return;
         injectGlobalStyles();
 
-        const isProduct = location.pathname.includes('/product/');
+        const isProduct = isProductPage();
+        const initialWidth = getPanelWidth();
+        document.documentElement.style.setProperty('--tt-panel-w', initialWidth + 'px');
 
         // ----- RAIL -----
         const rail = document.createElement('div');
@@ -1138,7 +1555,6 @@ console.log('[TeremTools] v7.0 запустился');
             borderLeft: '1px solid #e8e8e8',
             alignItems: 'center'
         });
-
         const mkRailBtn = (icon, title, onClick) => {
             const b = document.createElement('button');
             b.className = 'tt-rail-btn';
@@ -1147,23 +1563,17 @@ console.log('[TeremTools] v7.0 запустился');
             b.onclick = onClick;
             return b;
         };
-
         const expandBtn = mkRailBtn('◀', 'Развернуть панель', () => showPanel());
         rail.appendChild(expandBtn);
-
         const sep = document.createElement('div');
-        Object.assign(sep.style, {
-            width: '20px', height: '1px', background: '#e0e0e0', margin: '3px 0'
-        });
+        Object.assign(sep.style, { width: '20px', height: '1px', background: '#e0e0e0', margin: '3px 0' });
         rail.appendChild(sep);
-
         if (isProduct) {
             rail.appendChild(mkRailBtn('📦', 'Скачать ZIP фото', actionDownloadZip));
             rail.appendChild(mkRailBtn('🔗', 'Копировать URL фото', actionCopyLinks));
             rail.appendChild(mkRailBtn('📋', 'Копировать название', actionCopyName));
             rail.appendChild(mkRailBtn('🔢', 'Копировать артикул', actionCopyArticle));
         }
-
         const selBtn = mkRailBtn('🧺', 'Подборка', () => showPanel());
         const railBadge = document.createElement('span');
         railBadge.id = 'tt-rail-badge';
@@ -1177,7 +1587,6 @@ console.log('[TeremTools] v7.0 запустился');
         });
         selBtn.appendChild(railBadge);
         rail.appendChild(selBtn);
-
         document.body.appendChild(rail);
 
         // ----- ПАНЕЛЬ -----
@@ -1185,28 +1594,27 @@ console.log('[TeremTools] v7.0 запустился');
         panel.id = 'tt-panel';
         Object.assign(panel.style, {
             position: 'fixed', top: '0', right: '0', bottom: '0',
-            zIndex: 999999, width: '260px',
+            zIndex: 999999, width: initialWidth + 'px',
             display: 'none', flexDirection: 'column',
             background: '#fff',
             boxShadow: '-2px 0 12px rgba(0,0,0,.08)',
             borderLeft: '1px solid #e8e8e8'
         });
 
+        // Ресайзер
+        setupResizer(panel);
+
         // ----- Шапка -----
         const header = document.createElement('div');
         Object.assign(header.style, {
-            padding: '10px 12px 8px',
-            borderBottom: '1px solid #eee',
-            background: '#fff',
-            position: 'sticky', top: '0', zIndex: 2
+            padding: '10px 12px 8px', borderBottom: '1px solid #eee',
+            background: '#fff', position: 'sticky', top: '0', zIndex: 2
         });
-
         const headerTop = document.createElement('div');
         Object.assign(headerTop.style, {
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             marginBottom: isProduct ? '8px' : '0'
         });
-
         const headerTitle = document.createElement('div');
         Object.assign(headerTitle.style, {
             fontSize: '12.5px', fontWeight: '700', color: '#333',
@@ -1215,7 +1623,6 @@ console.log('[TeremTools] v7.0 запустился');
         const titleSpan = document.createElement('span');
         titleSpan.textContent = '🛠 Tools';
         headerTitle.appendChild(titleSpan);
-
         const headerSelCount = document.createElement('span');
         headerSelCount.id = 'tt-header-sel-count';
         Object.assign(headerSelCount.style, {
@@ -1225,7 +1632,6 @@ console.log('[TeremTools] v7.0 запустился');
             minWidth: '14px', textAlign: 'center'
         });
         headerTitle.appendChild(headerSelCount);
-
         const closeBtn = document.createElement('button');
         closeBtn.textContent = '▶';
         closeBtn.title = 'Свернуть';
@@ -1238,12 +1644,10 @@ console.log('[TeremTools] v7.0 запустился');
         closeBtn.onmouseenter = () => closeBtn.style.background = '#f5f5f5';
         closeBtn.onmouseleave = () => closeBtn.style.background = 'transparent';
         closeBtn.onclick = () => hidePanel();
-
         headerTop.appendChild(headerTitle);
         headerTop.appendChild(closeBtn);
         header.appendChild(headerTop);
 
-        // Мини-карточка товара (только на страницах товара)
         if (isProduct) {
             const miniCard = document.createElement('div');
             miniCard.id = 'tt-mini-card';
@@ -1256,11 +1660,8 @@ console.log('[TeremTools] v7.0 запустился');
             miniCard.appendChild(miniMeta);
             header.appendChild(miniCard);
 
-            // Быстрые действия — иконки в строку
             const quickRow = document.createElement('div');
-            Object.assign(quickRow.style, {
-                display: 'flex', gap: '4px', marginTop: '8px'
-            });
+            Object.assign(quickRow.style, { display: 'flex', gap: '4px', marginTop: '8px' });
             const mkQuickBtn = (icon, title, onClick) => {
                 const b = document.createElement('button');
                 b.className = 'tt-quick-btn';
@@ -1276,17 +1677,13 @@ console.log('[TeremTools] v7.0 запустился');
             quickRow.appendChild(mkQuickBtn('➕', 'В подборку', addToSelection));
             header.appendChild(quickRow);
         }
-
         panel.appendChild(header);
 
         // ----- Контейнер секций -----
         const body = document.createElement('div');
-        Object.assign(body.style, {
-            flex: '1', overflowY: 'auto', padding: '4px 10px 12px'
-        });
+        Object.assign(body.style, { flex: '1', overflowY: 'auto', padding: '4px 10px 12px' });
 
         if (isProduct) {
-            // 🔎 Характеристики — свёрнуты, если уже видны на странице
             const propsAvailable = parseProps().length > 0;
             if (propsAvailable) {
                 body.appendChild(buildSection(
@@ -1295,8 +1692,6 @@ console.log('[TeremTools] v7.0 запустился');
                     { defaultOpen: !arePropsVisibleOnPage() }
                 ));
             }
-
-            // 🧮 Калькулятор — открыт, если цена за >1 единицы
             const info = getPriceInfo();
             const calcAvailable = !isNaN(info.price);
             if (calcAvailable) {
@@ -1308,7 +1703,7 @@ console.log('[TeremTools] v7.0 запустился');
             }
         }
 
-        // 🧺 Подборка — всегда есть, открыта если не пуста
+        // 🧺 Подборка
         const selList = getSelection();
         body.appendChild(buildSection(
             'selection', '🧺', 'Подборка',
@@ -1316,7 +1711,14 @@ console.log('[TeremTools] v7.0 запустился');
             { defaultOpen: selList.length > 0, counter: true }
         ));
 
-        // 📒 Заметка — только на товаре
+        // 🕐 История
+        body.appendChild(buildSection(
+            'history', '🕐', 'История',
+            buildHistoryContent,
+            { defaultOpen: false }
+        ));
+
+        // 📒 Заметка
         if (isProduct) {
             const noteOpen = hasNote(getProductId());
             body.appendChild(buildSection(
@@ -1338,7 +1740,8 @@ console.log('[TeremTools] v7.0 запустился');
             storage.set('panelExpanded', true);
             updateHeaderCard();
             renderSelectionList();
-            updateSelectionCounter('selection', getSelection().length);
+            renderHistoryList();
+            updateSectionCounter('selection', getSelection().length);
         };
         hidePanel = function () {
             panel.style.display = 'none';
@@ -1348,40 +1751,39 @@ console.log('[TeremTools] v7.0 запустился');
             storage.set('panelExpanded', false);
         };
 
-        // Восстановление состояния
         const wasExpanded = storage.get('panelExpanded', true);
         if (wasExpanded) showPanel();
         else hidePanel();
 
-        // Подписки на обновления счётчика подборки
-        const origUpdateAllBadges = updateAllBadges;
-        // Перехват, чтобы обновлять и счётчик в секции
-        window._ttUpdateCounter = () => {
-            updateSectionCounter('selection', getSelection().length);
-        };
-
         updateHeaderCard();
         renderSelectionList();
+        renderHistoryList();
         updateAllBadges();
         updateSectionCounter('selection', getSelection().length);
     }
 
-        // Расширяем updateAllBadges, чтобы он обновлял и счётчик в секции
-    const _origUpdateAllBadges = updateAllBadges;
-    // переопределяем через свойство объекта, чтобы обойти strict mode
-    // (function declaration нельзя переприсваивать в strict)
-    const updateAllBadgesWrapper = function () {
-        _origUpdateAllBadges();
-        if (typeof window._ttUpdateCounter === 'function') {
-            window._ttUpdateCounter();
-        }
-    };
-    // Подменяем все вызовы через прокси
-    window._ttUpdateAllBadges = updateAllBadgesWrapper;
+    // ===== НАБЛЮДЕНИЕ ЗА КАТАЛОГОМ =====
+    let catalogObserver = null;
+    function setupCatalogWatch() {
+        if (!shouldEnableCatalogMode()) return;
+        createCatalogToolbar();
+        injectCatalogCheckboxes();
+        if (catalogObserver) catalogObserver.disconnect();
+        // Перерисовываем при подгрузке (бесконечный скролл и т.п.)
+        catalogObserver = new MutationObserver(() => {
+            clearTimeout(window._ttCatalogTimer);
+            window._ttCatalogTimer = setTimeout(() => {
+                injectCatalogCheckboxes();
+            }, 300);
+        });
+        catalogObserver.observe(document.body, { childList: true, subtree: true });
+    }
 
     // ===== ЗАПУСК =====
     function tryInit() {
         createPanel();
+        pushHistory();
+        setupCatalogWatch();
     }
     tryInit();
     setTimeout(tryInit, 1500);
