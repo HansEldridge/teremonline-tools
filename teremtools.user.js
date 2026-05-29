@@ -1,1791 +1,1485 @@
 // ==UserScript==
 // @name         Teremonline - Product Tools
 // @namespace    teremtools
-// @version      8.0
-// @description  Инструменты для teremonline.ru: панель, подборка, история, каталог-режим, ресайз, экспорт
+// @version      9.0
+// @description  Инструменты для teremonline.ru: панель, подборка, каталог-режим, ресайз, экспорт, темы (ООП)
 // @match        *://teremonline.ru/*
 // @match        *://*.teremonline.ru/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
-// @updateURL    https://raw.githubusercontent.com/HansEldridge/teremonline-tools/main/teremtools.user.js
-// @downloadURL  https://raw.githubusercontent.com/HansEldridge/teremonline-tools/main/teremtools.user.js
 // @run-at       document-end
 // ==/UserScript==
 
-console.log('[TeremTools] v8.0 запустился');
-
 (function () {
     'use strict';
+    console.log('[TeremTools] v9.0 (OOP) запустился');
 
-    // ===== ХРАНИЛИЩЕ =====
-    const storage = {
+    /* ============================================================
+     * Store — обёртка над хранилищем (GM / localStorage)
+     * ========================================================== */
+    class Store {
         get(key, def) {
             try {
                 if (typeof GM_getValue === 'function') {
                     const v = GM_getValue(key, null);
-                    if (v !== null && v !== undefined) {
-                        return typeof v === 'string' ? JSON.parse(v) : v;
-                    }
+                    if (v != null) return typeof v === 'string' ? JSON.parse(v) : v;
                     return def;
                 }
-            } catch (e) { console.warn('[TeremTools] GM_getValue fail', e); }
+            } catch {}
             try {
                 const raw = localStorage.getItem('tt_' + key);
                 return raw ? JSON.parse(raw) : def;
             } catch { return def; }
-        },
+        }
         set(key, val) {
             const json = JSON.stringify(val);
+            try { if (typeof GM_setValue === 'function') return GM_setValue(key, json); } catch {}
+            try { localStorage.setItem('tt_' + key, json); } catch {}
+        }
+    }
+
+    /* ============================================================
+     * Page — извлечение данных со страницы товара/каталога
+     * ========================================================== */
+    class Page {
+        static isProduct() { return location.pathname.includes('/product/'); }
+        static cleanUrl()  { return location.origin + location.pathname; }
+        static id()        { return Page.article() || location.pathname; }
+
+        static article() {
+            const m = document.body.innerText.match(/Арт[\.\s]*:?\s*([A-Za-z0-9][A-Za-z0-9\-_]*)/i);
+            return m ? m[1].trim() : null;
+        }
+        static articleOrAsk() {
+            return Page.article() || prompt('Артикул не найден. Введи вручную:', 'product') || 'product';
+        }
+        static name() {
+            const h1 = document.querySelector('h1');
+            if (h1 && h1.innerText.trim()) return h1.innerText.trim();
+            return (document.title || '').replace(/\s*[\|\-–—]\s*Teremonline.*$/i, '').trim();
+        }
+
+        static normalizeUnit(raw) {
+            if (!raw) return null;
+            const u = raw.toLowerCase().replace(/\s+/g, '').replace('.', '');
+            if (/^м2$|^м²$|^кв\.?м$|^квм$/.test(u)) return 'м²';
+            if (/^м3$|^м³$|^куб\.?м$|^кубм$/.test(u)) return 'м³';
+            if (/^мп$|^пм$|^пог\.?м$|^погм$|^м$/.test(u)) return 'м';
+            if (/^шт$|^штук$|^штука$/.test(u)) return 'шт';
+            if (/^кг$|^килограмм/.test(u)) return 'кг';
+            if (/^г$|^грамм/.test(u)) return 'г';
+            if (/^л$|^литр/.test(u)) return 'л';
+            if (/^уп$|^упак/.test(u)) return 'уп';
+            return raw.trim();
+        }
+        static parseNumber(s) {
+            if (!s) return NaN;
+            const m = s.replace(/\s|&nbsp;/g, '').replace(',', '.').match(/-?\d+(\.\d+)?/);
+            return m ? parseFloat(m[0]) : NaN;
+        }
+        static priceInfo() {
+            const t = document.body.innerText;
+            let price = NaN;
+            const pm = t.match(/цена\s*:?\s*([\d\s.,]+)\s*руб/i);
+            if (pm) price = Page.parseNumber(pm[1]);
+            let unitQty = 1, unitRaw = null;
+            const um = t.match(/\/\s*за\s+([\d\s.,]+)?\s*([а-яa-zё²³.]+)/i);
+            if (um) {
+                if (um[1] && um[1].trim()) {
+                    const q = Page.parseNumber(um[1]);
+                    if (!isNaN(q) && q > 0) unitQty = q;
+                }
+                unitRaw = um[2];
+            }
+            const unit = Page.normalizeUnit(unitRaw);
+            const pricePerUnit = (!isNaN(price) && unitQty > 0) ? price / unitQty : NaN;
+            return { price, unitQty, unit, pricePerUnit };
+        }
+
+        static parseProps() {
+            const cont = document.querySelector('.catalog-product-detail__props');
+            if (!cont) return [];
+            const dts = cont.querySelectorAll('dt');
+            const dds = cont.querySelectorAll('dd');
+            const out = [];
+            for (let i = 0; i < dts.length; i++) {
+                const name = (dts[i].innerText || '').trim();
+                const value = (dds[i]?.innerText || '').trim();
+                if (name && value) out.push({ name, value });
+            }
+            return out;
+        }
+        static propsVisible() {
+            const cont = document.querySelector('.catalog-product-detail__props');
+            return cont ? cont.getBoundingClientRect().height > 50 : false;
+        }
+
+        static toAbsolute(url) { try { return new URL(url, location.href).href; } catch { return url; } }
+        static upscale(url) {
+            return url.replace(/(_|\/|-)(\d{2,4})x(\d{2,4})(?=[._\/])/g, (m, s) => `${s}1600x1600`);
+        }
+        static findMainImage() {
+            let best = null;
+            for (const img of document.querySelectorAll('img')) {
+                const w = img.naturalWidth, h = img.naturalHeight;
+                if (!w || !h || w < 300 || h < 300 || Math.abs(w / h - 1) > 0.1) continue;
+                if (img.getBoundingClientRect().top + scrollY > 1500) continue;
+                if (!best || w > best.naturalWidth) best = img;
+            }
+            return best;
+        }
+        static collectPhotos() {
+            const res = [], seen = new Set();
+            const push = (url) => {
+                if (!url) return;
+                const abs = Page.toAbsolute(url);
+                let key = abs;
+                try { const u = new URL(abs); key = u.origin + u.pathname; } catch {}
+                if (seen.has(key)) return;
+                seen.add(key); res.push(abs);
+            };
+            const links = document.querySelectorAll('a[data-fancybox*="gallery"][data-src]');
+            for (const a of links) {
+                if (a.closest('.splide__slide--clone')) continue;
+                push(a.getAttribute('data-src'));
+            }
+            if (res.length) return res;
+
+            const mainList = document.querySelector('#slider-product-main-list, #slider-product-main');
+            if (mainList) {
+                for (const slide of mainList.querySelectorAll('li.splide__slide:not(.splide__slide--clone)')) {
+                    const a = slide.querySelector('a[data-src]');
+                    if (a) { push(a.getAttribute('data-src')); continue; }
+                    const img = slide.querySelector('img');
+                    if (img) push(Page.upscale(img.currentSrc || img.src));
+                }
+                if (res.length) return res;
+            }
+            const main = Page.findMainImage();
+            if (main) push(Page.upscale(main.currentSrc || main.src));
+            return res;
+        }
+        static mainPhoto() { return Page.collectPhotos()[0] || null; }
+    }
+
+    /* ============================================================
+     * Utils — общие функции (деньги, toast, clipboard, скачивание)
+     * ========================================================== */
+    const Utils = {
+        money(n) {
+            if (isNaN(n)) return '—';
+            const f = Math.round(n * 100) / 100;
+            const s = Math.abs(f - Math.round(f)) < 0.005 ? Math.round(f).toString() : f.toFixed(2);
+            return s.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽';
+        },
+        async copy(text) {
+            try { await navigator.clipboard.writeText(text); return true; }
+            catch {
+                const ta = document.createElement('textarea');
+                ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px';
+                document.body.appendChild(ta); ta.select();
+                const ok = document.execCommand('copy'); ta.remove(); return ok;
+            }
+        },
+        toast(msg, type) {
+            const t = document.createElement('div');
+            t.className = 'tt-toast ' + (type === 'err' ? 'err' : 'ok');
+            t.textContent = msg;
+            document.body.appendChild(t);
+            requestAnimationFrame(() => t.classList.add('show'));
+            setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2200);
+        },
+        download(blob, name) {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = name;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        },
+        blobToJpg(blob) {
+            return new Promise((resolve, reject) => {
+                const url = URL.createObjectURL(blob);
+                const img = new Image();
+                img.onload = () => {
+                    const c = document.createElement('canvas');
+                    c.width = img.naturalWidth; c.height = img.naturalHeight;
+                    const ctx = c.getContext('2d');
+                    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+                    ctx.drawImage(img, 0, 0);
+                    c.toBlob(b => { URL.revokeObjectURL(url); b ? resolve(b) : reject(); }, 'image/jpeg', 0.95);
+                };
+                img.onerror = () => { URL.revokeObjectURL(url); reject(); };
+                img.src = url;
+            });
+        },
+        async blobToU8(blob) { return new Uint8Array(await blob.arrayBuffer()); }
+    };
+
+    /* ============================================================
+     * Zip — генерация ZIP-архива (store-метод, без сжатия)
+     * ========================================================== */
+    const Zip = (() => {
+        const CRC = (() => {
+            const t = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                t[n] = c >>> 0;
+            }
+            return t;
+        })();
+        const crc32 = (u8) => {
+            let c = 0xFFFFFFFF;
+            for (let i = 0; i < u8.length; i++) c = CRC[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+            return (c ^ 0xFFFFFFFF) >>> 0;
+        };
+        const build = (files) => {
+            const enc = new TextEncoder(), local = [], central = [];
+            let offset = 0;
+            const now = new Date();
+            const dt = ((now.getHours() & 31) << 11) | ((now.getMinutes() & 63) << 5) | ((now.getSeconds() / 2) & 31);
+            const dd = (((now.getFullYear() - 1980) & 127) << 9) | (((now.getMonth() + 1) & 15) << 5) | (now.getDate() & 31);
+            for (const f of files) {
+                const nb = enc.encode(f.name), data = f.data, crc = crc32(data), size = data.length;
+                const lh = new Uint8Array(30 + nb.length), lv = new DataView(lh.buffer);
+                lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true);
+                lv.setUint16(10, dt, true); lv.setUint16(12, dd, true);
+                lv.setUint32(14, crc, true); lv.setUint32(18, size, true); lv.setUint32(22, size, true);
+                lv.setUint16(26, nb.length, true); lh.set(nb, 30);
+                local.push(lh, data);
+                const ch = new Uint8Array(46 + nb.length), cv = new DataView(ch.buffer);
+                cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
+                cv.setUint16(12, dt, true); cv.setUint16(14, dd, true);
+                cv.setUint32(16, crc, true); cv.setUint32(20, size, true); cv.setUint32(24, size, true);
+                cv.setUint16(28, nb.length, true); cv.setUint32(42, offset, true); ch.set(nb, 46);
+                central.push(ch);
+                offset += lh.length + data.length;
+            }
+            let cSize = 0; for (const c of central) cSize += c.length;
+            const eocd = new Uint8Array(22), ev = new DataView(eocd.buffer);
+            ev.setUint32(0, 0x06054b50, true);
+            ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
+            ev.setUint32(12, cSize, true); ev.setUint32(16, offset, true);
+            return new Blob([...local, ...central, eocd], { type: 'application/zip' });
+        };
+        return { build };
+    })();
+
+    /* ============================================================
+     * Actions — действия (скачать ZIP, копировать и т.п.)
+     * ========================================================== */
+    const Actions = {
+        async downloadZip() {
+            const article = Page.articleOrAsk();
+            const folder = article.replace(/[<>:"/\\|?*]/g, '_');
+            const urls = Page.collectPhotos();
+            if (!urls.length) return alert('Нет фото в карусели.');
+            if (!confirm(`Артикул: ${article}\nФото: ${urls.length}\nСобрать ZIP?`)) return;
+
+            const st = document.createElement('div');
+            st.className = 'tt-toast progress';
+            st.textContent = `⏳ Загрузка 0/${urls.length}`;
+            document.body.appendChild(st);
+            st.classList.add('show');
+
+            const files = []; let idx = 1, ok = 0;
             try {
-                if (typeof GM_setValue === 'function') { GM_setValue(key, json); return; }
-            } catch (e) { console.warn('[TeremTools] GM_setValue fail', e); }
-            try { localStorage.setItem('tt_' + key, json); }
-            catch (e) { console.warn('[TeremTools] localStorage fail', e); }
+                for (const u of urls) {
+                    st.textContent = `⏳ Загрузка ${idx}/${urls.length}`;
+                    try {
+                        const ctrl = new AbortController();
+                        const to = setTimeout(() => ctrl.abort(), 20000);
+                        const res = await fetch(u, { credentials: 'include', signal: ctrl.signal });
+                        clearTimeout(to);
+                        if (!res.ok) throw 0;
+                        const src = await res.blob();
+                        let out; try { out = await Utils.blobToJpg(src); } catch { out = src; }
+                        files.push({ name: `${folder}/${folder}_${idx}.jpg`, data: await Utils.blobToU8(out) });
+                        ok++;
+                    } catch (e) { console.warn('[TeremTools] фото', idx, e); }
+                    idx++;
+                }
+                if (!files.length) throw new Error('Не удалось скачать фото');
+                st.textContent = '📦 Собираю архив...';
+                await new Promise(r => setTimeout(r, 50));
+                Utils.download(Zip.build(files), `${folder}.zip`);
+                st.className = 'tt-toast ok show';
+                st.textContent = `✓ Готово: ${ok} фото`;
+            } catch (e) {
+                st.className = 'tt-toast err show';
+                st.textContent = '❌ ' + e.message;
+            } finally {
+                setTimeout(() => { st.classList.remove('show'); setTimeout(() => st.remove(), 300); }, 3000);
+            }
+        },
+        async copyLinks() {
+            const urls = Page.collectPhotos();
+            if (!urls.length) return alert('Нет фото в карусели.');
+            const j = urls.join(';');
+            (await Utils.copy(j)) ? Utils.toast(`Скопировано: ${urls.length} ссылок`) : prompt('Вручную:', j);
+        },
+        async copyName() {
+            const n = Page.name();
+            if (!n) return Utils.toast('Название не найдено', 'err');
+            (await Utils.copy(n)) ? Utils.toast('Скопировано название') : prompt('Вручную:', n);
+        },
+        async copyArticle() {
+            const a = Page.article();
+            if (!a) return Utils.toast('Артикул не найден', 'err');
+            (await Utils.copy(a)) ? Utils.toast(`Скопировано: ${a}`) : prompt('Вручную:', a);
         }
     };
 
-    // ===== УТИЛИТЫ =====
-    function getArticle() {
-        const m = document.body.innerText.match(/Арт[\.\s]*:?\s*([A-Za-z0-9][A-Za-z0-9\-_]*)/i);
-        return m ? m[1].trim() : null;
-    }
-    function getArticleOrAsk() {
-        const a = getArticle();
-        if (a) return a;
-        const manual = prompt('Артикул не найден. Введи вручную:', 'product');
-        return manual || 'product';
-    }
-    function getProductName() {
-        const h1 = document.querySelector('h1');
-        if (h1 && h1.innerText.trim()) return h1.innerText.trim();
-        let title = document.title || '';
-        return title.replace(/\s*[\|\-–—]\s*Teremonline.*$/i, '').trim();
-    }
-    function getProductId() { return getArticle() || location.pathname; }
-    function getCleanUrl()  { return location.origin + location.pathname; }
-    function isProductPage() { return location.pathname.includes('/product/'); }
+    /* ============================================================
+     * Selection — модель подборки товаров
+     * ========================================================== */
+    class Selection {
+        constructor(store) { this.store = store; this.KEY = 'selection'; this.listeners = []; }
+        onChange(fn) { this.listeners.push(fn); }
+        emit() { this.listeners.forEach(fn => fn(this.all())); }
+        all() { return this.store.get(this.KEY, []) || []; }
+        save(arr) { this.store.set(this.KEY, arr); this.emit(); }
+        has(id) { return this.all().some(x => x.id === id); }
 
-    function normalizeUnit(raw) {
-        if (!raw) return null;
-        let u = raw.toLowerCase().replace(/\s+/g, '').replace('.', '');
-        if (/^м2$|^м²$|^кв\.?м$|^квм$/.test(u)) return 'м²';
-        if (/^м3$|^м³$|^куб\.?м$|^кубм$/.test(u)) return 'м³';
-        if (/^мп$|^пм$|^пог\.?м$|^погм$/.test(u)) return 'м';
-        if (/^м$/.test(u)) return 'м';
-        if (/^шт$|^штук$|^штука$/.test(u)) return 'шт';
-        if (/^кг$|^килограмм/.test(u)) return 'кг';
-        if (/^г$|^грамм/.test(u)) return 'г';
-        if (/^л$|^литр/.test(u)) return 'л';
-        if (/^уп$|^упак/.test(u)) return 'уп';
-        return raw.trim();
-    }
-    function parseNumber(s) {
-        if (!s) return NaN;
-        s = s.replace(/\s|&nbsp;/g, '').replace(',', '.');
-        const m = s.match(/-?\d+(\.\d+)?/);
-        return m ? parseFloat(m[0]) : NaN;
-    }
-    function getPriceInfo() {
-        const bodyText = document.body.innerText;
-        let price = NaN;
-        const pm = bodyText.match(/цена\s*:?\s*([\d\s.,]+)\s*руб/i);
-        if (pm) price = parseNumber(pm[1]);
-        let unitQty = 1, unitRaw = null;
-        const um = bodyText.match(/\/\s*за\s+([\d\s.,]+)?\s*([а-яa-zё²³.]+)/i);
-        if (um) {
-            if (um[1] && um[1].trim()) {
-                const q = parseNumber(um[1]);
-                if (!isNaN(q) && q > 0) unitQty = q;
-            }
-            unitRaw = um[2];
-        }
-        const unit = normalizeUnit(unitRaw);
-        let pricePerUnit = NaN;
-        if (!isNaN(price) && unitQty > 0) pricePerUnit = price / unitQty;
-        return { price, unitQty, unit, pricePerUnit };
-    }
-    function formatMoney(n) {
-        if (isNaN(n)) return '—';
-        const fixed = Math.round(n * 100) / 100;
-        const s = (Math.abs(fixed - Math.round(fixed)) < 0.005)
-            ? Math.round(fixed).toString() : fixed.toFixed(2);
-        return s.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽';
-    }
-
-    function findMainImage() {
-        const imgs = Array.from(document.querySelectorAll('img'));
-        let best = null;
-        for (const img of imgs) {
-            const w = img.naturalWidth, h = img.naturalHeight;
-            if (!w || !h) continue;
-            if (w < 300 || h < 300) continue;
-            if (Math.abs(w / h - 1) > 0.1) continue;
-            const rect = img.getBoundingClientRect();
-            if (rect.top + window.scrollY > 1500) continue;
-            if (!best || w > best.naturalWidth) best = img;
-        }
-        return best;
-    }
-    function findCarouselContainer(mainImg) {
-        if (!mainImg) return null;
-        let node = mainImg.parentElement;
-        for (let i = 0; i < 8 && node; i++) {
-            const imgs = node.querySelectorAll('img');
-            const squares = Array.from(imgs).filter(img => {
-                const w = img.naturalWidth, h = img.naturalHeight;
-                return w >= 200 && h >= 200 && Math.abs(w / h - 1) < 0.1;
-            });
-            if (squares.length >= 2) return node;
-            node = node.parentElement;
-        }
-        return mainImg.parentElement;
-    }
-    function upscaleUrl(url) {
-        return url.replace(/(_|\/|-)(\d{2,4})x(\d{2,4})(?=[._\/])/g,
-            (m, sep) => `${sep}1600x1600`);
-    }
-    function toAbsolute(url) {
-        try { return new URL(url, location.href).href; } catch { return url; }
-    }
-    function collectPhotoUrls() {
-        const mainImg = findMainImage();
-        if (!mainImg) return [];
-        const container = findCarouselContainer(mainImg);
-        const imgs = Array.from(container.querySelectorAll('img'));
-        return [...new Set(
-            imgs.filter(img => {
-                const w = img.naturalWidth, h = img.naturalHeight;
-                return w >= 200 && h >= 200 && Math.abs(w / h - 1) < 0.1;
-            })
-            .map(img => img.currentSrc || img.src)
-            .filter(Boolean)
-            .map(u => toAbsolute(upscaleUrl(u)))
-        )];
-    }
-    function getMainPhotoUrl() {
-        const urls = collectPhotoUrls();
-        return urls[0] || null;
-    }
-    function blobToJpg(blob) {
-        return new Promise((resolve, reject) => {
-            const url = URL.createObjectURL(blob);
-            const img = new Image();
-            img.onload = () => {
-                const c = document.createElement('canvas');
-                c.width = img.naturalWidth; c.height = img.naturalHeight;
-                const ctx = c.getContext('2d');
-                ctx.fillStyle = '#fff';
-                ctx.fillRect(0, 0, c.width, c.height);
-                ctx.drawImage(img, 0, 0);
-                c.toBlob(b => {
-                    URL.revokeObjectURL(url);
-                    b ? resolve(b) : reject(new Error('toBlob failed'));
-                }, 'image/jpeg', 0.95);
-            };
-            img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('img load failed')); };
-            img.src = url;
-        });
-    }
-    async function copyToClipboard(text) {
-        try { await navigator.clipboard.writeText(text); return true; }
-        catch (e) {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed'; ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.select();
-            const ok = document.execCommand('copy');
-            ta.remove();
-            return ok;
-        }
-    }
-    function toast(msg, type) {
-        const t = document.createElement('div');
-        t.textContent = msg;
-        Object.assign(t.style, {
-            position: 'fixed', top: '20px', right: '20px', zIndex: 1000000,
-            padding: '10px 16px', borderRadius: '8px', color: '#fff',
-            fontSize: '13px', fontWeight: '600', maxWidth: '360px',
-            background: type === 'err' ? '#d9534f' : '#5cb85c',
-            boxShadow: '0 4px 12px rgba(0,0,0,.2)',
-            opacity: '0', transition: 'opacity .2s'
-        });
-        document.body.appendChild(t);
-        requestAnimationFrame(() => t.style.opacity = '1');
-        setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2200);
-    }
-    function downloadBlob(blob, filename) {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    }
-
-    // ===== CRC32 + ZIP =====
-    const CRC_TABLE = (() => {
-        const t = new Uint32Array(256);
-        for (let n = 0; n < 256; n++) {
-            let c = n;
-            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-            t[n] = c >>> 0;
-        }
-        return t;
-    })();
-    function crc32(uint8) {
-        let c = 0xFFFFFFFF;
-        for (let i = 0; i < uint8.length; i++) {
-            c = CRC_TABLE[(c ^ uint8[i]) & 0xFF] ^ (c >>> 8);
-        }
-        return (c ^ 0xFFFFFFFF) >>> 0;
-    }
-    function buildZip(files) {
-        const enc = new TextEncoder();
-        const localParts = [];
-        const centralParts = [];
-        let offset = 0;
-        const now = new Date();
-        const dosTime = ((now.getHours() & 0x1F) << 11) |
-                        ((now.getMinutes() & 0x3F) << 5) |
-                        ((now.getSeconds() / 2) & 0x1F);
-        const dosDate = (((now.getFullYear() - 1980) & 0x7F) << 9) |
-                        (((now.getMonth() + 1) & 0x0F) << 5) |
-                        (now.getDate() & 0x1F);
-
-        for (const f of files) {
-            const nameBytes = enc.encode(f.name);
-            const data = f.data;
-            const crc = crc32(data);
-            const size = data.length;
-            const localHeader = new Uint8Array(30 + nameBytes.length);
-            const lh = new DataView(localHeader.buffer);
-            lh.setUint32(0,  0x04034b50, true);
-            lh.setUint16(4,  20, true);
-            lh.setUint16(6,  0, true);
-            lh.setUint16(8,  0, true);
-            lh.setUint16(10, dosTime, true);
-            lh.setUint16(12, dosDate, true);
-            lh.setUint32(14, crc, true);
-            lh.setUint32(18, size, true);
-            lh.setUint32(22, size, true);
-            lh.setUint16(26, nameBytes.length, true);
-            lh.setUint16(28, 0, true);
-            localHeader.set(nameBytes, 30);
-            localParts.push(localHeader);
-            localParts.push(data);
-
-            const central = new Uint8Array(46 + nameBytes.length);
-            const cd = new DataView(central.buffer);
-            cd.setUint32(0,  0x02014b50, true);
-            cd.setUint16(4,  20, true);
-            cd.setUint16(6,  20, true);
-            cd.setUint16(8,  0, true);
-            cd.setUint16(10, 0, true);
-            cd.setUint16(12, dosTime, true);
-            cd.setUint16(14, dosDate, true);
-            cd.setUint32(16, crc, true);
-            cd.setUint32(20, size, true);
-            cd.setUint32(24, size, true);
-            cd.setUint16(28, nameBytes.length, true);
-            cd.setUint16(30, 0, true);
-            cd.setUint16(32, 0, true);
-            cd.setUint16(34, 0, true);
-            cd.setUint16(36, 0, true);
-            cd.setUint32(38, 0, true);
-            cd.setUint32(42, offset, true);
-            central.set(nameBytes, 46);
-            centralParts.push(central);
-            offset += localHeader.length + data.length;
-        }
-
-        const centralStart = offset;
-        let centralSize = 0;
-        for (const c of centralParts) centralSize += c.length;
-        const eocd = new Uint8Array(22);
-        const ev = new DataView(eocd.buffer);
-        ev.setUint32(0,  0x06054b50, true);
-        ev.setUint16(4,  0, true);
-        ev.setUint16(6,  0, true);
-        ev.setUint16(8,  files.length, true);
-        ev.setUint16(10, files.length, true);
-        ev.setUint32(12, centralSize, true);
-        ev.setUint32(16, centralStart, true);
-        ev.setUint16(20, 0, true);
-        return new Blob([...localParts, ...centralParts, eocd], { type: 'application/zip' });
-    }
-    async function blobToUint8(blob) {
-        const buf = await blob.arrayBuffer();
-        return new Uint8Array(buf);
-    }
-
-    // ===== ДЕЙСТВИЯ =====
-    async function actionDownloadZip() {
-        const article = getArticleOrAsk();
-        const folder = article.replace(/[<>:"/\\|?*]/g, '_');
-        const urls = collectPhotoUrls();
-        if (!urls.length) { alert('Нет фото в карусели.'); return; }
-        if (!confirm(`Артикул: ${article}\nФото: ${urls.length}\nСобрать ZIP?`)) return;
-
-        const statusToast = document.createElement('div');
-        Object.assign(statusToast.style, {
-            position: 'fixed', top: '20px', right: '20px', zIndex: 1000001,
-            padding: '12px 18px', borderRadius: '8px',
-            background: '#4a90e2', color: '#fff',
-            fontSize: '13px', fontWeight: '600',
-            boxShadow: '0 4px 12px rgba(0,0,0,.2)', minWidth: '200px'
-        });
-        statusToast.textContent = '⏳ Загрузка 0/' + urls.length;
-        document.body.appendChild(statusToast);
-
-        const files = [];
-        let idx = 1, ok = 0;
-        try {
-            for (const u of urls) {
-                statusToast.textContent = `⏳ Загрузка ${idx}/${urls.length}`;
-                try {
-                    const controller = new AbortController();
-                    const timeout = setTimeout(() => controller.abort(), 20000);
-                    const res = await fetch(u, { credentials: 'include', signal: controller.signal });
-                    clearTimeout(timeout);
-                    if (!res.ok) throw new Error('http ' + res.status);
-                    const srcBlob = await res.blob();
-                    let outBlob;
-                    try { outBlob = await blobToJpg(srcBlob); }
-                    catch (e) { outBlob = srcBlob; }
-                    const u8 = await blobToUint8(outBlob);
-                    files.push({ name: `${folder}/${folder}_${idx}.jpg`, data: u8 });
-                    ok++;
-                } catch (e) {
-                    console.warn('[TeremTools] ZIP: ошибка фото', idx, u, e);
-                }
-                idx++;
-            }
-            if (!files.length) throw new Error('Не удалось скачать ни одного фото');
-
-            statusToast.textContent = '📦 Собираю архив...';
-            await new Promise(r => setTimeout(r, 50));
-            const zipBlob = buildZip(files);
-            downloadBlob(zipBlob, `${folder}.zip`);
-            statusToast.style.background = '#5cb85c';
-            statusToast.textContent = `✓ Готово: ${ok} фото`;
-        } catch (e) {
-            statusToast.style.background = '#d9534f';
-            statusToast.textContent = '❌ ' + e.message;
-            alert('Ошибка: ' + e.message);
-        } finally {
-            setTimeout(() => {
-                statusToast.style.transition = 'opacity .3s';
-                statusToast.style.opacity = '0';
-                setTimeout(() => statusToast.remove(), 300);
-            }, 3000);
-        }
-    }
-    async function actionCopyLinks() {
-        const urls = collectPhotoUrls();
-        if (!urls.length) { alert('Нет фото в карусели.'); return; }
-        const joined = urls.join(';');
-        const ok = await copyToClipboard(joined);
-        if (ok) toast(`Скопировано: ${urls.length} ссылок`, 'ok');
-        else prompt('Скопируйте вручную:', joined);
-    }
-    async function actionCopyName() {
-        const name = getProductName();
-        if (!name) { toast('Название не найдено', 'err'); return; }
-        const ok = await copyToClipboard(name);
-        if (ok) toast(`Скопировано название`, 'ok');
-        else prompt('Скопируйте вручную:', name);
-    }
-    async function actionCopyArticle() {
-        const article = getArticle();
-        if (!article) { toast('Артикул не найден', 'err'); return; }
-        const ok = await copyToClipboard(article);
-        if (ok) toast(`Скопировано: ${article}`, 'ok');
-        else prompt('Скопируйте вручную:', article);
-    }
-
-    // ===== ПОДБОРКА =====
-    const SELECTION_KEY = 'selection';
-    function getSelection() { return storage.get(SELECTION_KEY, []) || []; }
-    function saveSelection(arr) {
-        storage.set(SELECTION_KEY, arr);
-        updateAllBadges();
-        updateSectionCounter('selection', arr.length);
-        refreshCatalogCheckboxes();
-    }
-    function isInSelection(id) { return getSelection().some(x => x.id === id); }
-    function addToSelection() {
-        const id = getProductId();
-        const list = getSelection();
-        if (list.some(x => x.id === id)) { toast('Уже в подборке', 'err'); return; }
-        const info = getPriceInfo();
-        list.push({
-            id, name: getProductName(), article: getArticle() || '',
-            url: getCleanUrl(), photo: getMainPhotoUrl() || '',
-            price: info.price, unitQty: info.unitQty, unit: info.unit || '',
-            addedAt: Date.now()
-        });
-        saveSelection(list);
-        toast('Добавлено в подборку ✓', 'ok');
-        renderSelectionList();
-        updateHeaderCard();
-        if (list.length === 1) expandSection('selection');
-    }
-    function removeFromSelection(id) {
-        saveSelection(getSelection().filter(x => x.id !== id));
-        renderSelectionList();
-        updateHeaderCard();
-    }
-    function clearSelection() {
-        if (!confirm('Очистить всю подборку?')) return;
-        saveSelection([]);
-        renderSelectionList();
-        updateHeaderCard();
-        toast('Подборка очищена', 'ok');
-    }
-    function formatSelectionForClipboard(list) {
-        if (!list.length) return '';
-        const lines = ['📋 Подборка товаров:', ''];
-        list.forEach((item, i) => {
-            lines.push(`${i + 1}. ${item.name}`);
-            if (!isNaN(item.price)) {
-                const unitTxt = item.unit ? ` за ${item.unitQty} ${item.unit}` : '';
-                lines.push(`   💰 ${formatMoney(item.price)}${unitTxt}`);
-            }
-            if (item.article) lines.push(`   🔢 Арт.: ${item.article}`);
-            lines.push(`   🔗 ${item.url}`);
-            lines.push('');
-        });
-        lines.push('Точные цены и условия уточню после согласования.');
-        return lines.join('\n');
-    }
-    async function actionCopySelection() {
-        const list = getSelection();
-        if (!list.length) { toast('Подборка пуста', 'err'); return; }
-        const text = formatSelectionForClipboard(list);
-        const ok = await copyToClipboard(text);
-        if (ok) toast(`Скопировано: ${list.length} товаров`, 'ok');
-        else prompt('Скопируйте вручную:', text);
-    }
-
-    // ===== ЭКСПОРТ ПОДБОРКИ =====
-    function exportSelectionCSV() {
-        const list = getSelection();
-        if (!list.length) { toast('Подборка пуста', 'err'); return; }
-        const headers = ['№','Название','Артикул','Цена','За кол-во','Ед.','URL'];
-        const rows = list.map((it, i) => [
-            i + 1, it.name || '', it.article || '',
-            isNaN(it.price) ? '' : it.price,
-            it.unitQty || '', it.unit || '', it.url || ''
-        ]);
-        const escape = (v) => {
-            const s = String(v).replace(/"/g, '""');
-            return /[",;\n]/.test(s) ? `"${s}"` : s;
-        };
-        const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(escape).join(';')).join('\r\n');
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-        downloadBlob(blob, `selection_${Date.now()}.csv`);
-        toast('CSV скачан ✓', 'ok');
-    }
-    function exportSelectionJSON() {
-        const list = getSelection();
-        if (!list.length) { toast('Подборка пуста', 'err'); return; }
-        const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
-        downloadBlob(blob, `selection_${Date.now()}.json`);
-        toast('JSON скачан ✓', 'ok');
-    }
-    function exportSelectionTXT() {
-        const list = getSelection();
-        if (!list.length) { toast('Подборка пуста', 'err'); return; }
-        const text = list.map(it => it.url).join('\n');
-        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-        downloadBlob(blob, `selection_links_${Date.now()}.txt`);
-        toast('TXT скачан ✓', 'ok');
-    }
-
-    // ===== ЗАМЕТКИ =====
-    const NOTES_KEY = 'notes';
-    function getAllNotes() { return storage.get(NOTES_KEY, {}) || {}; }
-    function getNote(id) { return getAllNotes()[id] || ''; }
-    function hasNote(id) {
-        const n = getNote(id);
-        return !!(n && n.text && n.text.trim());
-    }
-    function saveNote(id, text) {
-        const all = getAllNotes();
-        if (text && text.trim()) {
-            all[id] = { text: text.trim(), updatedAt: Date.now() };
-        } else { delete all[id]; }
-        storage.set(NOTES_KEY, all);
-    }
-
-    // ===== ИСТОРИЯ ПРОСМОТРОВ =====
-    const HISTORY_KEY = 'history';
-    const HISTORY_MAX = 20;
-    function getHistory() { return storage.get(HISTORY_KEY, []) || []; }
-    function saveHistory(arr) { storage.set(HISTORY_KEY, arr); }
-    function pushHistory() {
-        if (!isProductPage()) return;
-        const id = getProductId();
-        const name = getProductName();
-        if (!name) return;
-        let list = getHistory().filter(x => x.id !== id);
-        list.unshift({
-            id, name, article: getArticle() || '',
-            url: getCleanUrl(), visitedAt: Date.now()
-        });
-        if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX);
-        saveHistory(list);
-    }
-    function removeFromHistory(id) {
-        saveHistory(getHistory().filter(x => x.id !== id));
-        renderHistoryList();
-    }
-    function clearHistory() {
-        if (!confirm('Очистить всю историю?')) return;
-        saveHistory([]);
-        renderHistoryList();
-        toast('История очищена', 'ok');
-    }
-    function formatHistoryTime(ts) {
-        const diff = Date.now() - ts;
-        const min = Math.floor(diff / 60000);
-        if (min < 1) return 'сейчас';
-        if (min < 60) return min + 'м';
-        const hr = Math.floor(min / 60);
-        if (hr < 24) return hr + 'ч';
-        const d = Math.floor(hr / 24);
-        if (d < 7) return d + 'д';
-        const dt = new Date(ts);
-        return dt.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
-    }
-
-    // ===== ХАРАКТЕРИСТИКИ =====
-    function parseProps() {
-        const cont = document.querySelector('.catalog-product-detail__props');
-        if (!cont) return [];
-        const dts = cont.querySelectorAll('dt');
-        const dds = cont.querySelectorAll('dd');
-        const out = [];
-        for (let i = 0; i < dts.length; i++) {
-            const name = (dts[i].innerText || '').trim();
-            const value = (dds[i]?.innerText || '').trim();
-            if (name && value) out.push({ name, value });
-        }
-        return out;
-    }
-    function arePropsVisibleOnPage() {
-        const cont = document.querySelector('.catalog-product-detail__props');
-        if (!cont) return false;
-        const rect = cont.getBoundingClientRect();
-        return rect.height > 50;
-    }
-
-    // ===== СЕКЦИИ КОНТЕНТА =====
-    function buildPropsContent() {
-        const wrap = document.createElement('div');
-        const props = parseProps();
-        if (!props.length) {
-            const msg = document.createElement('div');
-            msg.textContent = 'Нет характеристик';
-            Object.assign(msg.style, { color: '#999', fontSize: '11.5px', textAlign: 'center', padding: '4px' });
-            wrap.appendChild(msg);
-            return wrap;
-        }
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = `Поиск среди ${props.length} характеристик...`;
-        Object.assign(input.style, {
-            width: '100%', padding: '6px 8px', borderRadius: '5px',
-            border: '1px solid #d8d8d8', background: '#fff',
-            color: '#222', fontSize: '12px', outline: 'none',
-            boxSizing: 'border-box', marginBottom: '6px'
-        });
-        const results = document.createElement('div');
-        Object.assign(results.style, {
-            display: 'flex', flexDirection: 'column', gap: '2px',
-            maxHeight: '220px', overflowY: 'auto'
-        });
-        function render(filter) {
-            results.innerHTML = '';
-            const q = (filter || '').toLowerCase().trim();
-            const list = q ? props.filter(p =>
-                p.name.toLowerCase().includes(q) || p.value.toLowerCase().includes(q)) : props;
-            if (!list.length) {
-                const empty = document.createElement('div');
-                empty.textContent = 'Ничего не найдено';
-                Object.assign(empty.style, { color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '6px' });
-                results.appendChild(empty);
-                return;
-            }
-            list.forEach(p => {
-                const row = document.createElement('div');
-                Object.assign(row.style, {
-                    display: 'flex', alignItems: 'center', gap: '6px',
-                    padding: '5px 7px', borderRadius: '4px',
-                    fontSize: '11.5px', cursor: 'pointer', transition: 'background .12s'
-                });
-                row.onmouseenter = () => row.style.background = '#f0f5fb';
-                row.onmouseleave = () => row.style.background = 'transparent';
-                const nm = document.createElement('div');
-                nm.textContent = p.name;
-                Object.assign(nm.style, {
-                    color: '#666', flex: '1', minWidth: 0,
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                });
-                const vl = document.createElement('div');
-                vl.textContent = p.value;
-                Object.assign(vl.style, {
-                    color: '#222', fontWeight: '600', maxWidth: '50%', textAlign: 'right',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-                });
-                row.title = `Клик — копировать значение\nShift+клик — копировать имя: значение`;
-                row.onclick = async (e) => {
-                    const text = e.shiftKey ? `${p.name}: ${p.value}` : p.value;
-                    const ok = await copyToClipboard(text);
-                    if (ok) toast('Скопировано: ' + text.substring(0, 40), 'ok');
-                };
-                row.appendChild(nm); row.appendChild(vl);
-                results.appendChild(row);
-            });
-        }
-        input.addEventListener('input', () => render(input.value));
-        input.addEventListener('keydown', async (e) => {
-            if (e.key === 'Escape') { input.value = ''; render(''); }
-            else if (e.key === 'Enter') {
-                const q = input.value.toLowerCase().trim();
-                if (!q) return;
-                const found = props.find(p =>
-                    p.name.toLowerCase().includes(q) || p.value.toLowerCase().includes(q));
-                if (found) {
-                    const ok = await copyToClipboard(found.value);
-                    if (ok) toast('Скопировано: ' + found.value, 'ok');
-                }
-            }
-        });
-        render('');
-        wrap.appendChild(input);
-        wrap.appendChild(results);
-        return wrap;
-    }
-
-    function buildCalcContent() {
-        const info = getPriceInfo();
-        const wrap = document.createElement('div');
-        if (isNaN(info.price)) {
-            const msg = document.createElement('div');
-            msg.textContent = 'Цена не распознана';
-            Object.assign(msg.style, { color: '#999', fontSize: '12px', textAlign: 'center', padding: '4px' });
-            wrap.appendChild(msg);
-            return wrap;
-        }
-        const unit = info.unit || 'ед';
-        const perUnit = info.pricePerUnit;
-        const infoLine = document.createElement('div');
-        infoLine.innerHTML =
-            `<div style="color:#666;font-size:11.5px;line-height:1.5;text-align:center;margin-bottom:8px;">
-                <b style="color:#222;">${formatMoney(info.price)}</b> за <b style="color:#222;">${info.unitQty} ${unit}</b>
-                <span style="color:#bbb;">·</span>
-                <b style="color:#2a8a2a;">${formatMoney(perUnit)}</b><span style="color:#999;"> / ${unit}</span>
-             </div>`;
-        wrap.appendChild(infoLine);
-        const row = document.createElement('div');
-        Object.assign(row.style, {
-            display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '6px', background: '#f7f9fc', borderRadius: '6px'
-        });
-        const input = document.createElement('input');
-        input.type = 'number'; input.min = '0'; input.step = 'any';
-        input.value = info.unitQty.toString();
-        Object.assign(input.style, {
-            width: '70px', padding: '5px 7px', borderRadius: '5px',
-            border: '1px solid #d8d8d8', background: '#fff',
-            color: '#222', fontSize: '13px', fontWeight: '600', textAlign: 'right', outline: 'none'
-        });
-        const unitLbl = document.createElement('div');
-        unitLbl.textContent = unit;
-        Object.assign(unitLbl.style, { color: '#666', fontSize: '12px', minWidth: '22px' });
-        const eq = document.createElement('div');
-        eq.textContent = '=';
-        Object.assign(eq.style, { color: '#bbb', fontSize: '13px' });
-        const result = document.createElement('div');
-        Object.assign(result.style, {
-            color: '#2a8a2a', fontSize: '14px', fontWeight: 'bold', flex: '1', textAlign: 'right'
-        });
-        const recalc = () => {
-            const qty = parseFloat((input.value || '0').replace(',', '.'));
-            if (isNaN(qty) || qty < 0) { result.textContent = '—'; return; }
-            result.textContent = formatMoney(perUnit * qty);
-        };
-        input.addEventListener('input', recalc);
-        recalc();
-        row.appendChild(input); row.appendChild(unitLbl);
-        row.appendChild(eq); row.appendChild(result);
-        wrap.appendChild(row);
-        return wrap;
-    }
-
-    // ===== ПОДБОРКА (UI) =====
-    function buildSelectionContent() {
-        const wrap = document.createElement('div');
-        Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '6px' });
-
-        if (isProductPage()) {
-            const addBtn = document.createElement('button');
-            addBtn.id = 'tt-sel-add-btn';
-            addBtn.className = 'tt-btn success';
-            Object.assign(addBtn.style, { textAlign: 'center' });
-            wrap.appendChild(addBtn);
-        }
-
-        const list = document.createElement('div');
-        list.id = 'tt-sel-list';
-        Object.assign(list.style, {
-            display: 'flex', flexDirection: 'column', gap: '2px',
-            maxHeight: '220px', overflowY: 'auto'
-        });
-        wrap.appendChild(list);
-
-        const actions = document.createElement('div');
-                Object.assign(actions.style, { display: 'flex', gap: '6px' });
-
-        const copyBtn = document.createElement('button');
-        copyBtn.textContent = '📋 Скопировать';
-        copyBtn.className = 'tt-btn primary';
-        copyBtn.style.flex = '1';
-        copyBtn.style.textAlign = 'center';
-        copyBtn.onclick = actionCopySelection;
-
-        const exportBtn = document.createElement('button');
-        exportBtn.textContent = '📤';
-        exportBtn.title = 'Экспорт';
-        exportBtn.className = 'tt-btn';
-        exportBtn.style.textAlign = 'center';
-
-                const exportMenu = document.createElement('div');
-        Object.assign(exportMenu.style, {
-            position: 'absolute', bottom: 'calc(100% + 4px)', right: '0',
-            background: '#fff', border: '1px solid #e0e0e0',
-            borderRadius: '6px', boxShadow: '0 4px 12px rgba(0,0,0,.15)',
-            padding: '4px', display: 'none', zIndex: '100',
-            minWidth: '150px', flexDirection: 'column', gap: '2px'
-        });
-        const mkExportItem = (label, fn) => {
-            const b = document.createElement('button');
-            b.textContent = label;
-            Object.assign(b.style, {
-                background: 'transparent', border: 'none',
-                padding: '7px 10px', textAlign: 'left',
-                fontSize: '12px', cursor: 'pointer',
-                borderRadius: '4px', color: '#333',
-                fontFamily: 'inherit'
-            });
-            b.onmouseenter = () => b.style.background = '#f0f5fb';
-            b.onmouseleave = () => b.style.background = 'transparent';
-            b.onclick = () => { exportMenu.style.display = 'none'; fn(); };
-            return b;
-        };
-        exportMenu.appendChild(mkExportItem('📄 CSV (Excel)', exportSelectionCSV));
-        exportMenu.appendChild(mkExportItem('🔧 JSON', exportSelectionJSON));
-        exportMenu.appendChild(mkExportItem('🔗 TXT (ссылки)', exportSelectionTXT));
-
-        exportBtn.onclick = (e) => {
-            e.stopPropagation();
-            exportMenu.style.display = exportMenu.style.display === 'flex' ? 'none' : 'flex';
-        };
-        document.addEventListener('click', () => { exportMenu.style.display = 'none'; });
-
-        const clearBtn = document.createElement('button');
-        clearBtn.textContent = '🗑';
-        clearBtn.className = 'tt-btn danger';
-        clearBtn.style.textAlign = 'center';
-        clearBtn.onclick = clearSelection;
-
-                // Обёртка для кнопки экспорта + меню (для правильного позиционирования)
-        const exportWrap = document.createElement('div');
-        Object.assign(exportWrap.style, { position: 'relative', display: 'flex' });
-        exportWrap.appendChild(exportBtn);
-        exportWrap.appendChild(exportMenu);
-
-        actions.appendChild(copyBtn);
-        actions.appendChild(exportWrap);
-        actions.appendChild(clearBtn);
-        wrap.appendChild(actions);
-        return wrap;
-    }
-
-    function renderSelectionList() {
-        const cont = document.getElementById('tt-sel-list');
-        if (!cont) return;
-        const list = getSelection();
-        cont.innerHTML = '';
-        if (!list.length) {
-            const empty = document.createElement('div');
-            empty.textContent = 'Подборка пуста';
-            Object.assign(empty.style, {
-                color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '8px'
-            });
-            cont.appendChild(empty);
-            updateSelectionButton();
-            return;
-        }
-        list.forEach((item, i) => {
-            const row = document.createElement('div');
-            Object.assign(row.style, {
-                display: 'flex', alignItems: 'center', gap: '6px',
-                padding: '5px 6px', borderRadius: '4px',
-                fontSize: '11.5px', color: '#222', transition: 'background .12s'
-            });
-            row.onmouseenter = () => row.style.background = '#f5f5f5';
-            row.onmouseleave = () => row.style.background = 'transparent';
-            const num = document.createElement('div');
-            num.textContent = (i + 1) + '.';
-            Object.assign(num.style, { color: '#aaa', minWidth: '16px', fontSize: '11px' });
-            const info = document.createElement('div');
-            Object.assign(info.style, { flex: '1', minWidth: 0, overflow: 'hidden' });
-            const nm = document.createElement('a');
-            nm.href = item.url; nm.target = '_blank';
-            nm.textContent = item.name || 'Без названия';
-            Object.assign(nm.style, {
-                color: '#2a5db0', textDecoration: 'none', display: 'block',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                fontWeight: '600'
-            });
-            const pr = document.createElement('div');
-            if (!isNaN(item.price)) {
-                pr.textContent = formatMoney(item.price) +
-                    (item.unit ? ` / ${item.unitQty} ${item.unit}` : '');
-            }
-            Object.assign(pr.style, { color: '#2a8a2a', fontSize: '10.5px' });
-            info.appendChild(nm);
-            if (pr.textContent) info.appendChild(pr);
-            const del = document.createElement('button');
-            del.textContent = '✕';
-            Object.assign(del.style, {
-                background: 'transparent', border: 'none', color: '#c44',
-                cursor: 'pointer', fontSize: '13px', padding: '0 4px', fontWeight: 'bold'
-            });
-            del.onclick = () => removeFromSelection(item.id);
-            row.appendChild(num); row.appendChild(info); row.appendChild(del);
-            cont.appendChild(row);
-        });
-        updateSelectionButton();
-    }
-
-    function updateSelectionButton() {
-        const btn = document.getElementById('tt-sel-add-btn');
-        if (!btn) return;
-        const id = getProductId();
-        if (isInSelection(id)) {
-            btn.textContent = '✓ В подборке (убрать)';
-            btn.className = 'tt-btn muted';
-            btn.style.textAlign = 'center';
-            btn.onclick = () => { removeFromSelection(id); toast('Убрано из подборки', 'ok'); };
-        } else {
-            btn.textContent = '➕ Добавить в подборку';
-            btn.className = 'tt-btn success';
-            btn.style.textAlign = 'center';
-            btn.onclick = addToSelection;
-        }
-    }
-
-    // ===== ИСТОРИЯ (UI) =====
-    function buildHistoryContent() {
-        const wrap = document.createElement('div');
-        Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '6px' });
-
-        const list = document.createElement('div');
-        list.id = 'tt-hist-list';
-        Object.assign(list.style, {
-            display: 'flex', flexDirection: 'column', gap: '2px',
-            maxHeight: '240px', overflowY: 'auto'
-        });
-        wrap.appendChild(list);
-
-        const clearBtn = document.createElement('button');
-        clearBtn.textContent = '🗑 Очистить историю';
-        clearBtn.className = 'tt-btn danger';
-        clearBtn.style.textAlign = 'center';
-        clearBtn.onclick = clearHistory;
-        wrap.appendChild(clearBtn);
-        return wrap;
-    }
-
-    function renderHistoryList() {
-        const cont = document.getElementById('tt-hist-list');
-        if (!cont) return;
-        const list = getHistory();
-        cont.innerHTML = '';
-        if (!list.length) {
-            const empty = document.createElement('div');
-            empty.textContent = 'История пуста';
-            Object.assign(empty.style, {
-                color: '#aaa', fontSize: '11px', textAlign: 'center', padding: '8px'
-            });
-            cont.appendChild(empty);
-            return;
-        }
-        list.forEach(item => {
-            const row = document.createElement('div');
-            Object.assign(row.style, {
-                display: 'flex', alignItems: 'center', gap: '6px',
-                padding: '5px 6px', borderRadius: '4px',
-                fontSize: '11.5px', transition: 'background .12s'
-            });
-            row.onmouseenter = () => row.style.background = '#f5f5f5';
-            row.onmouseleave = () => row.style.background = 'transparent';
-            const info = document.createElement('div');
-            Object.assign(info.style, { flex: '1', minWidth: 0, overflow: 'hidden' });
-            const nm = document.createElement('a');
-            nm.href = item.url;
-            nm.textContent = item.name || 'Без названия';
-            Object.assign(nm.style, {
-                color: '#2a5db0', textDecoration: 'none', display: 'block',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                fontWeight: '600'
-            });
-            const meta = document.createElement('div');
-            meta.textContent = (item.article ? item.article + ' · ' : '') + formatHistoryTime(item.visitedAt);
-            Object.assign(meta.style, { color: '#999', fontSize: '10.5px' });
-            info.appendChild(nm); info.appendChild(meta);
-            const del = document.createElement('button');
-            del.textContent = '✕';
-            Object.assign(del.style, {
-                background: 'transparent', border: 'none', color: '#c44',
-                cursor: 'pointer', fontSize: '13px', padding: '0 4px', fontWeight: 'bold'
-            });
-            del.onclick = () => removeFromHistory(item.id);
-            row.appendChild(info); row.appendChild(del);
-            cont.appendChild(row);
-        });
-    }
-
-    // ===== ЗАМЕТКИ (UI) =====
-    function buildNotesContent() {
-        const wrap = document.createElement('div');
-        Object.assign(wrap.style, { display: 'flex', flexDirection: 'column', gap: '4px' });
-        const id = getProductId();
-        const existing = getNote(id);
-        const initialText = existing && existing.text ? existing.text : '';
-        const ta = document.createElement('textarea');
-        ta.id = 'tt-note-area';
-        ta.value = initialText;
-        ta.placeholder = 'Заметка по этому товару...';
-        Object.assign(ta.style, {
-            width: '100%', minHeight: '60px', maxHeight: '180px',
-            padding: '7px', borderRadius: '5px',
-            border: '1px solid #d8d8d8', background: '#fff', color: '#222',
-            fontSize: '12px', fontFamily: 'inherit', resize: 'vertical',
-            outline: 'none', boxSizing: 'border-box'
-        });
-        const status = document.createElement('div');
-        Object.assign(status.style, {
-            color: '#aaa', fontSize: '10px', textAlign: 'right',
-            minHeight: '12px', transition: 'color .2s'
-        });
-        if (existing && existing.updatedAt) {
-            const d = new Date(existing.updatedAt);
-            status.textContent = '✓ ' + d.toLocaleString('ru-RU', {
-                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-            });
-        }
-        let saveTimer = null;
-        ta.addEventListener('input', () => {
-            status.textContent = '✏ ...';
-            status.style.color = '#aaa';
-            if (saveTimer) clearTimeout(saveTimer);
-            saveTimer = setTimeout(() => {
-                saveNote(id, ta.value);
-                const now = new Date();
-                status.textContent = '✓ ' + now.toLocaleString('ru-RU', {
-                    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-                });
-                status.style.color = '#2a8a2a';
-                updateHeaderCard();
-            }, 600);
-        });
-        wrap.appendChild(ta);
-        wrap.appendChild(status);
-        return wrap;
-    }
-
-    // ===== АККОРДЕОН =====
-    const ACCORDION_KEY = 'accordionState';
-    function getAccordionState() { return storage.get(ACCORDION_KEY, {}) || {}; }
-    function setSectionOpen(id, open) {
-        const s = getAccordionState();
-        s[id] = open;
-        storage.set(ACCORDION_KEY, s);
-    }
-    function isSectionOpen(id, defaultOpen) {
-        const s = getAccordionState();
-        if (id in s) return s[id];
-        return defaultOpen;
-    }
-    function expandSection(id) {
-        const section = document.querySelector(`[data-tt-section="${id}"]`);
-        if (!section) return;
-        const body = section.querySelector('.tt-sec-body');
-        const arrow = section.querySelector('.tt-sec-arrow');
-        if (body && body.style.display === 'none') {
-            body.style.display = 'block';
-            if (arrow) arrow.textContent = '▾';
-            setSectionOpen(id, true);
-        }
-    }
-
-    // ===== КАТАЛОГ-РЕЖИМ =====
-    function findCatalogCards() {
-        // Ищем ссылки на /product/ — карточки товаров в каталоге
-        const links = Array.from(document.querySelectorAll('a[href*="/product/"]'));
-        const cards = new Map(); // элемент -> {url, name}
-        for (const a of links) {
-            // Поднимаемся к "карточке" (контейнер с картинкой)
-            let card = a;
-            for (let i = 0; i < 5 && card.parentElement; i++) {
-                if (card.querySelector('img')) break;
-                card = card.parentElement;
-            }
-            // Берём ближайший общий родитель с img
-            let host = a;
-            for (let i = 0; i < 6 && host.parentElement; i++) {
-                if (host.querySelector('img')) break;
-                host = host.parentElement;
-            }
-            if (!host.querySelector('img')) continue;
-            const rect = host.getBoundingClientRect();
-            if (rect.width < 80 || rect.height < 80) continue;
-            const url = a.href.split('?')[0].split('#')[0];
-            if (cards.has(host)) continue;
-            // Имя — текст ссылки или alt картинки
-            let name = (a.innerText || '').trim();
-            if (!name) {
-                const img = host.querySelector('img');
-                name = (img?.alt || '').trim();
-            }
-            cards.set(host, { url, name, link: a });
-        }
-        return Array.from(cards.entries()).map(([el, data]) => ({ el, ...data }));
-    }
-
-    function shouldEnableCatalogMode() {
-        if (isProductPage()) return false;
-        return findCatalogCards().length >= 3;
-    }
-
-    function makeCatalogId(url) {
-        // ID = последняя значимая часть URL
-        try {
-            const u = new URL(url);
-            const parts = u.pathname.split('/').filter(Boolean);
-            return parts[parts.length - 1] || url;
-        } catch { return url; }
-    }
-
-    function refreshCatalogCheckboxes() {
-        const cbs = document.querySelectorAll('.tt-catalog-cb');
-        const sel = getSelection();
-        cbs.forEach(cb => {
-            const id = cb.dataset.ttId;
-            const inSel = sel.some(x => x.id === id);
-            cb.classList.toggle('tt-cb-checked', inSel);
-            cb.textContent = inSel ? '✓' : '';
-        });
-        updateCatalogToolbar();
-    }
-
-    function updateCatalogToolbar() {
-        const tb = document.getElementById('tt-cat-toolbar');
-        if (!tb) return;
-        const cbs = document.querySelectorAll('.tt-catalog-cb.tt-cb-checked');
-        const visibleCbs = document.querySelectorAll('.tt-catalog-cb');
-        const count = cbs.length;
-        const countEl = tb.querySelector('.tt-cat-count');
-        if (countEl) countEl.textContent = count;
-        tb.style.display = visibleCbs.length > 0 ? 'flex' : 'none';
-    }
-
-    function injectCatalogCheckboxes() {
-        if (!shouldEnableCatalogMode()) return;
-        const cards = findCatalogCards();
-        if (!cards.length) return;
-        const sel = getSelection();
-        cards.forEach(card => {
-            if (card.el.querySelector('.tt-catalog-cb')) return;
-            const id = makeCatalogId(card.url);
-            const cb = document.createElement('div');
-            cb.className = 'tt-catalog-cb';
-            cb.dataset.ttId = id;
-            cb.dataset.ttUrl = card.url;
-            cb.dataset.ttName = card.name;
-            const inSel = sel.some(x => x.id === id);
-            if (inSel) {
-                cb.classList.add('tt-cb-checked');
-                cb.textContent = '✓';
-            }
-            cb.title = 'Добавить/убрать из подборки';
-            cb.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                toggleCatalogItem(cb);
-            };
-            // Делаем родителя relative, чтобы absolute-чекбокс позиционировался
-            const cs = getComputedStyle(card.el);
-            if (cs.position === 'static') card.el.style.position = 'relative';
-            card.el.appendChild(cb);
-        });
-        updateCatalogToolbar();
-    }
-
-    function toggleCatalogItem(cb) {
-        const id = cb.dataset.ttId;
-        const url = cb.dataset.ttUrl;
-        const name = cb.dataset.ttName || 'Товар';
-        const list = getSelection();
-        const idx = list.findIndex(x => x.id === id);
-        if (idx >= 0) {
-            list.splice(idx, 1);
-            saveSelection(list);
-            renderSelectionList();
-        } else {
+        addCurrent() {
+            const id = Page.id();
+            if (this.has(id)) return Utils.toast('Уже в подборке', 'err');
+            const info = Page.priceInfo();
+            const list = this.all();
             list.push({
-                id, name, article: '',
-                url, photo: '',
-                price: NaN, unitQty: 1, unit: '',
-                addedAt: Date.now()
+                id, name: Page.name(), article: Page.article() || '',
+                url: Page.cleanUrl(), photo: Page.mainPhoto() || '',
+                price: info.price, unitQty: info.unitQty, unit: info.unit || '', addedAt: Date.now()
             });
-            saveSelection(list);
-            renderSelectionList();
+            this.save(list);
+            Utils.toast('Добавлено в подборку ✓');
+        }
+        addRaw(item) {
+            if (this.has(item.id)) return;
+            const list = this.all(); list.push(item); this.save(list);
+        }
+        remove(id) { this.save(this.all().filter(x => x.id !== id)); }
+        clear() {
+            if (!this.all().length || !confirm('Очистить всю подборку?')) return;
+            this.save([]); Utils.toast('Подборка очищена');
+        }
+        toggle(item) {
+            this.has(item.id) ? this.remove(item.id) : this.addRaw(item);
+        }
+
+        formatText() {
+            const list = this.all();
+            if (!list.length) return '';
+            const lines = ['📋 Подборка товаров:', ''];
+            list.forEach((it, i) => {
+                lines.push(`${i + 1}. ${it.name}`);
+                if (!isNaN(it.price)) {
+                    const u = it.unit ? ` за ${it.unitQty} ${it.unit}` : '';
+                    lines.push(`   💰 ${Utils.money(it.price)}${u}`);
+                }
+                if (it.article) lines.push(`   🔢 Арт.: ${it.article}`);
+                lines.push(`   🔗 ${it.url}`, '');
+            });
+            lines.push('Точные цены и условия уточню после согласования.');
+            return lines.join('\n');
+        }
+        async copyText() {
+            const list = this.all();
+            if (!list.length) return Utils.toast('Подборка пуста', 'err');
+            const t = this.formatText();
+            (await Utils.copy(t)) ? Utils.toast(`Скопировано: ${list.length} товаров`) : prompt('Вручную:', t);
+        }
+        exportCSV() {
+            const list = this.all();
+            if (!list.length) return Utils.toast('Подборка пуста', 'err');
+            const h = ['№', 'Название', 'Артикул', 'Цена', 'За кол-во', 'Ед.', 'URL'];
+            const rows = list.map((it, i) => [i + 1, it.name || '', it.article || '',
+                isNaN(it.price) ? '' : it.price, it.unitQty || '', it.unit || '', it.url || '']);
+            const esc = v => { const s = String(v).replace(/"/g, '""'); return /[",;\n]/.test(s) ? `"${s}"` : s; };
+            const csv = '\uFEFF' + [h, ...rows].map(r => r.map(esc).join(';')).join('\r\n');
+            Utils.download(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `selection_${Date.now()}.csv`);
+            Utils.toast('CSV скачан ✓');
+        }
+        exportJSON() {
+            const list = this.all();
+            if (!list.length) return Utils.toast('Подборка пуста', 'err');
+            Utils.download(new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' }), `selection_${Date.now()}.json`);
+            Utils.toast('JSON скачан ✓');
+        }
+        exportTXT() {
+            const list = this.all();
+            if (!list.length) return Utils.toast('Подборка пуста', 'err');
+            Utils.download(new Blob([list.map(it => it.url).join('\n')], { type: 'text/plain;charset=utf-8' }), `selection_links_${Date.now()}.txt`);
+            Utils.toast('TXT скачан ✓');
         }
     }
 
-    function selectAllCatalog() {
-        const cbs = Array.from(document.querySelectorAll('.tt-catalog-cb:not(.tt-cb-checked)'));
-        if (!cbs.length) { toast('Все уже выбраны', 'ok'); return; }
-        const list = getSelection();
-        cbs.forEach(cb => {
-            const id = cb.dataset.ttId;
-            if (list.some(x => x.id === id)) return;
-            list.push({
-                id,
-                name: cb.dataset.ttName || 'Товар',
-                article: '',
-                url: cb.dataset.ttUrl,
-                photo: '', price: NaN, unitQty: 1, unit: '',
-                addedAt: Date.now()
-            });
-        });
-        saveSelection(list);
-        renderSelectionList();
-        toast(`Добавлено: ${cbs.length}`, 'ok');
+    /* ============================================================
+     * Notes — заметки по товарам
+     * ========================================================== */
+    class Notes {
+        constructor(store) { this.store = store; this.KEY = 'notes'; }
+        all() { return this.store.get(this.KEY, {}) || {}; }
+        get(id) { return this.all()[id] || null; }
+        has(id) { const n = this.get(id); return !!(n && n.text && n.text.trim()); }
+        save(id, text) {
+            const all = this.all();
+            if (text && text.trim()) all[id] = { text: text.trim(), updatedAt: Date.now() };
+            else delete all[id];
+            this.store.set(this.KEY, all);
+        }
     }
 
-    function deselectAllCatalog() {
-        const cbs = Array.from(document.querySelectorAll('.tt-catalog-cb.tt-cb-checked'));
-        if (!cbs.length) return;
-        const ids = new Set(cbs.map(cb => cb.dataset.ttId));
-        const list = getSelection().filter(x => !ids.has(x.id));
-        saveSelection(list);
-        renderSelectionList();
-        toast(`Снято: ${cbs.length}`, 'ok');
+    /* ============================================================
+     * Theme — управление темой (light/dark)
+     * ========================================================== */
+    class Theme {
+        constructor(store) {
+            this.store = store;
+            this.current = store.get('theme', 'light');
+        }
+        apply() {
+            const root = document.getElementById('tt-panel');
+            const rail = document.getElementById('tt-rail');
+            [root, rail].forEach(el => el && el.setAttribute('data-tt-theme', this.current));
+        }
+        toggle() {
+            this.current = this.current === 'light' ? 'dark' : 'light';
+            this.store.set('theme', this.current);
+            this.apply();
+            return this.current;
+        }
     }
 
-    function createCatalogToolbar() {
-        if (document.getElementById('tt-cat-toolbar')) return;
-        const tb = document.createElement('div');
-        tb.id = 'tt-cat-toolbar';
-        Object.assign(tb.style, {
-            position: 'fixed', bottom: '20px', left: '20px',
-            zIndex: 999998, display: 'none',
-            alignItems: 'center', gap: '8px',
-            background: '#fff', padding: '8px 12px',
-            borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,.15)',
-            border: '1px solid #e0e0e0', fontSize: '12px'
-        });
-        const label = document.createElement('div');
-        label.innerHTML = 'Выбрано: <b class="tt-cat-count" style="color:#5cb85c;">0</b>';
-        Object.assign(label.style, { color: '#333', marginRight: '4px' });
+    /* ============================================================
+     * Styles — единая система стилей с темами через CSS-переменные
+     * ========================================================== */
+    class Styles {
+        static inject() {
+            if (document.getElementById('tt-style')) return;
+            const st = document.createElement('style');
+            st.id = 'tt-style';
+                        st.textContent = `
+            /* ===== Темы (CSS-переменные) ===== */
+            [data-tt-theme="light"] {
+                --bg: #ffffff;          --bg-soft: #f4f6fa;     --bg-soft2: #eef1f6;
+                --border: #e3e6ec;      --border-strong: #cfd4dd;
+                --text: #1c1f26;        --text-soft: #5a6070;   --text-mute: #9aa0ad;
+                --accent: #4a7dff;      --accent-hover: #3a6bef;
+                --success: #2eaa54;     --success-hover: #259047;
+                --danger: #e0524a;      --danger-soft: #fdeceb;
+                --shadow: 0 8px 30px rgba(20,30,60,.12);
+                --green: #2eaa54;       --link: #2a5db0;
+            }
+            [data-tt-theme="dark"] {
+                --bg: #1c1f26;          --bg-soft: #262a33;     --bg-soft2: #2f343f;
+                --border: #353a45;      --border-strong: #454b58;
+                --text: #e8eaef;        --text-soft: #a8aebc;   --text-mute: #6b7280;
+                --accent: #5b8bff;      --accent-hover: #6f9bff;
+                --success: #3dc06a;     --success-hover: #4cd079;
+                --danger: #ff6b62;      --danger-soft: #3a2826;
+                --shadow: 0 8px 30px rgba(0,0,0,.5);
+                --green: #4cd079;       --link: #7fa9ff;
+            }
 
-        const selAll = document.createElement('button');
-        selAll.textContent = '☑ Все';
-        selAll.className = 'tt-btn primary';
-        selAll.style.padding = '5px 10px';
-        selAll.style.fontSize = '11.5px';
-        selAll.onclick = selectAllCatalog;
-
-        const desAll = document.createElement('button');
-        desAll.textContent = '☐ Снять';
-        desAll.className = 'tt-btn';
-        desAll.style.padding = '5px 10px';
-        desAll.style.fontSize = '11.5px';
-        desAll.onclick = deselectAllCatalog;
-
-        tb.appendChild(label);
-        tb.appendChild(selAll);
-        tb.appendChild(desAll);
-        document.body.appendChild(tb);
-    }
-
-    // ===== СТИЛИ =====
-    function injectGlobalStyles() {
-        if (document.getElementById('tt-style-main')) return;
-        const st = document.createElement('style');
-        st.id = 'tt-style-main';
-        st.textContent = `
+            /* ===== Сдвиг страницы ===== */
             html.tt-shifted body {
-                margin-right: var(--tt-panel-w, 260px) !important;
-                transition: margin-right .2s ease;
+                margin-right: var(--tt-panel-w, 320px) !important;
+                transition: margin-right .25s ease;
             }
-            html.tt-rail-mode body {
-                margin-right: 48px !important;
-                transition: margin-right .2s ease;
-            }
+            html.tt-rail-mode body { margin-right: 56px !important; transition: margin-right .25s ease; }
             html.tt-resizing body { transition: none !important; }
             html.tt-resizing { user-select: none; cursor: ew-resize; }
 
+            /* ===== Базовые ===== */
             #tt-panel, #tt-rail {
-                font-family: system-ui, -apple-system, sans-serif;
-                color: #2b2b2b;
+                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+                color: var(--text);
+                box-sizing: border-box;
             }
+            #tt-panel *, #tt-rail * { box-sizing: border-box; }
+            #tt-panel ::-webkit-scrollbar { width: 8px; }
+            #tt-panel ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
             #tt-panel input[type=number]::-webkit-outer-spin-button,
-            #tt-panel input[type=number]::-webkit-inner-spin-button {
-                -webkit-appearance: none; margin: 0;
-            }
-            #tt-panel input[type=number] { -moz-appearance: textfield; appearance: textfield; }
-            #tt-panel ::-webkit-scrollbar { width: 6px; }
-            #tt-panel ::-webkit-scrollbar-thumb { background: #d0d0d0; border-radius: 3px; }
-            #tt-panel ::-webkit-scrollbar-thumb:hover { background: #b0b0b0; }
+            #tt-panel input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+            #tt-panel input[type=number] { -moz-appearance: textfield; }
 
-            /* Ресайзер */
-            #tt-resizer {
-                position: absolute; top: 0; left: -3px;
-                width: 6px; height: 100%; cursor: ew-resize;
-                z-index: 5; background: transparent;
-                transition: background .15s;
+            /* ===== RAIL ===== */
+            #tt-rail {
+                position: fixed; top: 0; right: 0; bottom: 0; z-index: 999999;
+                width: 56px; display: flex; flex-direction: column; gap: 8px;
+                padding: 12px 10px; background: var(--bg);
+                border-left: 1px solid var(--border);
+                box-shadow: -4px 0 16px rgba(0,0,0,.08); align-items: center;
             }
-            #tt-resizer:hover, #tt-resizer.tt-active {
-                background: rgba(74,144,226,.35);
-            }
-
-            .tt-btn {
-                padding: 7px 10px; border: 1px solid #d8d8d8;
-                background: #fff; color: #2b2b2b;
-                border-radius: 5px; cursor: pointer;
-                font-size: 12.5px; font-weight: 600;
-                transition: background .12s, border-color .12s;
-                text-align: left; font-family: inherit;
-            }
-            .tt-btn:hover { background: #f5f5f5; border-color: #c0c0c0; }
-            .tt-btn.primary { background: #4a90e2; border-color: #4a90e2; color: #fff; }
-            .tt-btn.primary:hover { background: #3d7fcc; border-color: #3d7fcc; }
-            .tt-btn.success { background: #5cb85c; border-color: #5cb85c; color: #fff; }
-            .tt-btn.success:hover { background: #4ca64c; border-color: #4ca64c; }
-            .tt-btn.danger { background: #fff; border-color: #e0a0a0; color: #c44; }
-            .tt-btn.danger:hover { background: #fff0f0; }
-            .tt-btn.muted { background: #ededed; border-color: #d8d8d8; color: #666; }
-
             .tt-rail-btn {
-                width: 32px; height: 32px;
+                width: 36px; height: 36px; display: flex; align-items: center;
+                justify-content: center; background: var(--bg-soft);
+                border: 1px solid var(--border); border-radius: 10px;
+                cursor: pointer; font-size: 17px; position: relative;
+                transition: all .15s; padding: 0; color: var(--text);
+            }
+            .tt-rail-btn:hover { background: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
+            .tt-rail-sep { width: 22px; height: 1px; background: var(--border); margin: 4px 0; }
+            #tt-rail-badge {
+                position: absolute; top: -5px; right: -5px;
+                background: var(--success); color: #fff; font-size: 10px;
+                font-weight: 700; padding: 2px 5px; border-radius: 10px;
+                min-width: 16px; text-align: center; display: none;
+                border: 2px solid var(--bg); line-height: 1.2;
+            }
+
+            /* ===== ПАНЕЛЬ ===== */
+            #tt-panel {
+                position: fixed; top: 0; right: 0; bottom: 0; z-index: 999999;
+                display: none; flex-direction: column; background: var(--bg);
+                border-left: 1px solid var(--border); box-shadow: var(--shadow);
+            }
+            #tt-resizer {
+                position: absolute; top: 0; left: -4px; width: 8px; height: 100%;
+                cursor: ew-resize; z-index: 5; background: transparent; transition: background .15s;
+            }
+            #tt-resizer:hover, #tt-resizer.tt-active { background: rgba(74,125,255,.4); }
+
+            /* ===== Шапка ===== */
+            .tt-header {
+                padding: 14px 16px 12px; border-bottom: 1px solid var(--border);
+                background: var(--bg); position: sticky; top: 0; z-index: 2;
+            }
+            .tt-header-top {
+                display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            }
+            .tt-title {
+                font-size: 16px; font-weight: 800; color: var(--text);
+                display: flex; align-items: center; gap: 8px; letter-spacing: .3px;
+            }
+            .tt-title-badge {
+                display: none; background: var(--success); color: #fff;
+                font-size: 11px; font-weight: 700; padding: 2px 8px;
+                border-radius: 10px; min-width: 18px; text-align: center;
+            }
+            .tt-icon-btn {
+                background: var(--bg-soft); border: 1px solid var(--border);
+                color: var(--text-soft); font-size: 14px; cursor: pointer;
+                border-radius: 8px; padding: 6px 9px; transition: all .15s;
                 display: flex; align-items: center; justify-content: center;
-                background: #fff; border: 1px solid #e0e0e0;
-                border-radius: 6px; cursor: pointer;
-                font-size: 15px; position: relative;
-                transition: background .12s, border-color .12s;
-                font-family: inherit; padding: 0;
             }
-            .tt-rail-btn:hover { background: #f0f5fb; border-color: #4a90e2; }
+            .tt-icon-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 
-            .tt-quick-btn {
-                width: 32px; height: 32px;
-                display: flex; align-items: center; justify-content: center;
-                background: #fff; border: 1px solid #e0e0e0;
-                border-radius: 5px; cursor: pointer;
-                font-size: 14px; transition: background .12s, border-color .12s;
-                padding: 0; font-family: inherit;
-                flex: 1; min-width: 0;
-            }
-            .tt-quick-btn:hover { background: #f0f5fb; border-color: #4a90e2; }
-            .tt-quick-btn:disabled { opacity: .4; cursor: not-allowed; }
-
-            .tt-section { border-bottom: 1px solid #eee; }
-            .tt-section:last-child { border-bottom: none; }
-            .tt-sec-head {
-                display: flex; align-items: center; justify-content: space-between;
-                padding: 8px 4px; cursor: pointer; user-select: none;
-                transition: background .12s;
-            }
-            .tt-sec-head:hover { background: #fafafa; }
-            .tt-sec-title {
-                font-size: 12px; font-weight: 600; color: #333;
-                display: flex; align-items: center; gap: 6px;
-            }
-            .tt-sec-arrow { color: #aaa; font-size: 10px; transition: transform .15s; }
-            .tt-sec-counter {
-                background: #5cb85c; color: #fff;
-                font-size: 10px; font-weight: bold;
-                padding: 1px 6px; border-radius: 8px;
-                min-width: 16px; text-align: center; line-height: 1.3;
-            }
-            .tt-sec-body { padding: 4px 4px 10px 4px; }
-
+            /* ===== Мини-карточка товара ===== */
             .tt-mini-card {
-                padding: 8px 10px; background: #f7f9fc;
-                border-radius: 6px; margin-bottom: 8px;
-                border-left: 3px solid #4a90e2;
+                padding: 11px 13px; background: var(--bg-soft); border-radius: 12px;
+                margin-top: 12px; border-left: 4px solid var(--accent);
             }
             .tt-mini-name {
-                font-size: 11.5px; font-weight: 600; color: #222;
-                line-height: 1.3;
-                display: -webkit-box; -webkit-line-clamp: 2;
-                -webkit-box-orient: vertical; overflow: hidden;
-                margin-bottom: 3px;
+                font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.35;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                overflow: hidden; margin-bottom: 5px;
             }
             .tt-mini-meta {
-                font-size: 10.5px; color: #777;
-                display: flex; align-items: center; gap: 6px;
-                flex-wrap: wrap;
+                font-size: 12px; color: var(--text-soft); display: flex;
+                align-items: center; gap: 7px; flex-wrap: wrap;
             }
-            .tt-mini-meta b { color: #2a8a2a; font-size: 11px; }
+            .tt-mini-meta b { color: var(--green); font-size: 13px; }
+            .tt-mini-meta .sep { color: var(--text-mute); }
 
-            /* Каталог-чекбоксы */
+            /* ===== Быстрые кнопки ===== */
+            .tt-quick-row { display: flex; gap: 6px; margin-top: 10px; }
+            .tt-quick-btn {
+                flex: 1; height: 38px; display: flex; align-items: center; justify-content: center;
+                background: var(--bg-soft); border: 1px solid var(--border);
+                border-radius: 10px; cursor: pointer; font-size: 17px;
+                transition: all .15s; color: var(--text); min-width: 0;
+            }
+            .tt-quick-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+            /* ===== Тело панели ===== */
+            .tt-body { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
+
+            /* ===== Секции (карточки) ===== */
+            .tt-section {
+                background: var(--bg-soft); border: 1px solid var(--border);
+                border-radius: 14px; margin-bottom: 12px; overflow: hidden;
+            }
+            .tt-sec-head {
+                display: flex; align-items: center; justify-content: space-between;
+                padding: 13px 15px; cursor: pointer; user-select: none; transition: background .12s;
+            }
+            .tt-sec-head:hover { background: var(--bg-soft2); }
+            .tt-sec-title {
+                font-size: 14px; font-weight: 700; color: var(--text);
+                display: flex; align-items: center; gap: 9px;
+            }
+            .tt-sec-arrow { color: var(--text-mute); font-size: 12px; transition: transform .2s; }
+            .tt-sec-counter {
+                background: var(--success); color: #fff; font-size: 11px; font-weight: 700;
+                padding: 2px 8px; border-radius: 10px; min-width: 18px; text-align: center;
+            }
+            .tt-sec-body { padding: 4px 13px 14px; }
+
+            /* ===== Кнопки ===== */
+            .tt-btn {
+                padding: 10px 13px; border: 1px solid var(--border); background: var(--bg);
+                color: var(--text); border-radius: 10px; cursor: pointer;
+                font-size: 13.5px; font-weight: 600; transition: all .15s;
+                font-family: inherit;
+            }
+            .tt-btn:hover { background: var(--bg-soft2); border-color: var(--border-strong); }
+            .tt-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+            .tt-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+            .tt-btn.success { background: var(--success); border-color: var(--success); color: #fff; }
+            .tt-btn.success:hover { background: var(--success-hover); border-color: var(--success-hover); }
+            .tt-btn.danger { background: var(--bg); border-color: var(--border); color: var(--danger); }
+            .tt-btn.danger:hover { background: var(--danger-soft); border-color: var(--danger); }
+            .tt-btn.muted { background: var(--bg-soft2); border-color: var(--border); color: var(--text-soft); }
+
+            /* ===== Инпуты ===== */
+            .tt-input {
+                width: 100%; padding: 10px 12px; border-radius: 10px;
+                border: 1px solid var(--border); background: var(--bg);
+                color: var(--text); font-size: 13.5px; outline: none;
+                font-family: inherit; transition: border-color .15s;
+            }
+            .tt-input:focus { border-color: var(--accent); }
+            .tt-input::placeholder { color: var(--text-mute); }
+
+            /* ===== Список характеристик ===== */
+            .tt-props-list { display: flex; flex-direction: column; gap: 3px; max-height: 260px; overflow-y: auto; margin-top: 8px; }
+            .tt-prop-row {
+                display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+                border-radius: 8px; font-size: 13px; cursor: pointer; transition: background .12s;
+            }
+            .tt-prop-row:hover { background: var(--bg2, var(--bg)); }
+            .tt-prop-name { color: var(--text-soft); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .tt-prop-val { color: var(--text); font-weight: 700; max-width: 50%; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+            /* ===== Калькулятор ===== */
+            .tt-calc-info {
+                color: var(--text-soft); font-size: 13px; line-height: 1.5;
+                text-align: center; margin-bottom: 10px;
+            }
+            .tt-calc-info b { color: var(--text); }
+            .tt-calc-info .per { color: var(--green); font-weight: 700; }
+            .tt-calc-row {
+                display: flex; align-items: center; gap: 9px; padding: 10px;
+                background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+            }
+            .tt-calc-input {
+                width: 80px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+                background: var(--bg-soft); color: var(--text); font-size: 15px;
+                font-weight: 700; text-align: right; outline: none;
+            }
+            .tt-calc-input:focus { border-color: var(--accent); }
+            .tt-calc-result { color: var(--green); font-size: 17px; font-weight: 800; flex: 1; text-align: right; }
+
+            /* ===== Список подборки ===== */
+            .tt-list { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; }
+            .tt-list-row {
+                display: flex; align-items: center; gap: 8px; padding: 9px 10px;
+                border-radius: 9px; font-size: 13px; transition: background .12s; background: var(--bg);
+            }
+            .tt-list-row:hover { background: var(--bg-soft2); }
+            .tt-list-num { color: var(--text-mute); min-width: 20px; font-size: 12px; }
+            .tt-list-info { flex: 1; min-width: 0; overflow: hidden; }
+            .tt-list-name {
+                color: var(--link); text-decoration: none; display: block; font-weight: 700;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px;
+            }
+            .tt-list-name:hover { text-decoration: underline; }
+            .tt-list-price { color: var(--green); font-size: 12px; margin-top: 2px; }
+            .tt-list-del {
+                background: transparent; border: none; color: var(--danger);
+                cursor: pointer; font-size: 16px; padding: 0 6px; font-weight: 700; border-radius: 6px;
+            }
+            .tt-list-del:hover { background: var(--danger-soft); }
+            .tt-empty { color: var(--text-mute); font-size: 13px; text-align: center; padding: 14px; }
+
+            /* ===== Действия подборки ===== */
+            .tt-sel-actions { display: flex; gap: 7px; margin-top: 10px; }
+            .tt-export-wrap { position: relative; display: flex; }
+            .tt-export-menu {
+                position: absolute; bottom: calc(100% + 6px); right: 0;
+                background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+                box-shadow: var(--shadow); padding: 5px; display: none; z-index: 100;
+                min-width: 170px; flex-direction: column; gap: 3px;
+            }
+            .tt-export-item {
+                background: transparent; border: none; padding: 9px 12px; text-align: left;
+                font-size: 13px; cursor: pointer; border-radius: 8px; color: var(--text); font-family: inherit;
+            }
+            .tt-export-item:hover { background: var(--bg-soft2); }
+
+            /* ===== Заметка ===== */
+            .tt-note-area {
+                width: 100%; min-height: 80px; max-height: 200px; padding: 11px;
+                border-radius: 10px; border: 1px solid var(--border); background: var(--bg);
+                color: var(--text); font-size: 13.5px; font-family: inherit;
+                resize: vertical; outline: none; line-height: 1.5;
+            }
+            .tt-note-area:focus { border-color: var(--accent); }
+            .tt-note-status { color: var(--text-mute); font-size: 11px; text-align: right; min-height: 14px; margin-top: 4px; transition: color .2s; }
+            .tt-note-status.saved { color: var(--green); }
+
+            /* ===== Toast ===== */
+            .tt-toast {
+                position: fixed; top: 24px; right: 24px; z-index: 1000001;
+                padding: 13px 18px; border-radius: 12px; color: #fff;
+                font-size: 14px; font-weight: 600; max-width: 380px;
+                box-shadow: 0 8px 24px rgba(0,0,0,.25); opacity: 0;
+                transform: translateY(-8px); transition: all .25s; font-family: system-ui, sans-serif;
+            }
+            .tt-toast.show { opacity: 1; transform: translateY(0); }
+            .tt-toast.ok { background: #2eaa54; }
+            .tt-toast.err { background: #e0524a; }
+            .tt-toast.progress { background: #4a7dff; min-width: 220px; }
+
+            /* ===== Каталог-чекбоксы ===== */
             .tt-catalog-cb {
-                position: absolute; top: 8px; left: 8px;
-                width: 24px; height: 24px;
-                background: rgba(255,255,255,.95);
-                border: 2px solid #c0c0c0;
-                border-radius: 5px;
+                position: absolute; top: 10px; left: 10px; width: 28px; height: 28px;
+                background: rgba(255,255,255,.96); border: 2px solid #c0c0c0; border-radius: 8px;
                 display: flex; align-items: center; justify-content: center;
-                font-size: 14px; font-weight: bold; color: #fff;
-                cursor: pointer; z-index: 100;
-                box-shadow: 0 1px 4px rgba(0,0,0,.15);
-                transition: all .12s; user-select: none;
+                font-size: 16px; font-weight: 700; color: #fff; cursor: pointer; z-index: 100;
+                box-shadow: 0 2px 8px rgba(0,0,0,.18); transition: all .15s; user-select: none;
             }
-            .tt-catalog-cb:hover {
-                border-color: #4a90e2; transform: scale(1.1);
-            }
-            .tt-catalog-cb.tt-cb-checked {
-                background: #5cb85c; border-color: #5cb85c;
-            }
-        `;
-        document.head.appendChild(st);
-    }
+            .tt-catalog-cb:hover { border-color: #4a7dff; transform: scale(1.12); }
+            .tt-catalog-cb.tt-cb-checked { background: #2eaa54; border-color: #2eaa54; }
 
-    // ===== ШАПКА: мини-карточка =====
-    function updateHeaderCard() {
-        const card = document.getElementById('tt-mini-card');
-        if (!card) return;
-        if (!isProductPage()) { card.style.display = 'none'; return; }
-        card.style.display = 'block';
-        const name = getProductName();
-        const article = getArticle();
-        const info = getPriceInfo();
-        const selCount = getSelection().length;
-        const noteFlag = hasNote(getProductId()) ? '📒' : '';
-        const inSel = isInSelection(getProductId()) ? '✓' : '';
-
-        const nameEl = card.querySelector('.tt-mini-name');
-        const metaEl = card.querySelector('.tt-mini-meta');
-        if (nameEl) nameEl.textContent = name || 'Товар';
-        if (metaEl) {
-            const parts = [];
-            if (article) parts.push(`<span>${article}</span>`);
-            if (!isNaN(info.price)) parts.push(`<b>${formatMoney(info.price)}</b>`);
-            if (inSel) parts.push(`<span style="color:#5cb85c;">${inSel} в подборке</span>`);
-            if (noteFlag) parts.push(`<span title="Есть заметка">${noteFlag}</span>`);
-            metaEl.innerHTML = parts.join('<span style="color:#ccc;">·</span>');
-        }
-        const headerCounter = document.getElementById('tt-header-sel-count');
-        if (headerCounter) {
-            headerCounter.textContent = selCount;
-            headerCounter.style.display = selCount > 0 ? 'inline-block' : 'none';
+            /* ===== Каталог-тулбар ===== */
+            #tt-cat-toolbar {
+                position: fixed; bottom: 24px; left: 24px; z-index: 999998;
+                display: none; align-items: center; gap: 10px; background: #fff;
+                padding: 11px 16px; border-radius: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+                border: 1px solid #e3e6ec; font-size: 13px; color: #1c1f26;
+                font-family: system-ui, sans-serif;
+            }
+            #tt-cat-toolbar b { color: #2eaa54; }
+            `;
+            document.head.appendChild(st);
         }
     }
 
-    function updateAllBadges() {
-        const railBadge = document.getElementById('tt-rail-badge');
-        if (railBadge) {
-            const n = getSelection().length;
-            railBadge.textContent = n;
-            railBadge.style.display = n > 0 ? 'inline-block' : 'none';
-        }
-        updateHeaderCard();
-    }
+    /* ============================================================
+     * Section — переиспользуемая сворачиваемая секция (аккордеон)
+     * ========================================================== */
+    class Section {
+        constructor(id, icon, title, contentBuilder, opts = {}) {
+            this.id = id; this.opts = opts; this.built = false;
+            this.contentBuilder = contentBuilder;
 
-    // ===== СЕКЦИЯ-БИЛДЕР =====
-    function buildSection(id, icon, title, contentBuilder, opts = {}) {
-        const section = document.createElement('div');
-        section.className = 'tt-section';
-        section.dataset.ttSection = id;
-        const head = document.createElement('div');
-        head.className = 'tt-sec-head';
-        const titleEl = document.createElement('div');
-        titleEl.className = 'tt-sec-title';
-        const titleText = document.createElement('span');
-        titleText.textContent = `${icon} ${title}`;
-        titleEl.appendChild(titleText);
-        if (opts.counter) {
-            const counter = document.createElement('span');
-            counter.className = 'tt-sec-counter';
-            counter.id = `tt-sec-counter-${id}`;
-            counter.style.display = 'none';
-            titleEl.appendChild(counter);
+            const sec = document.createElement('div');
+            sec.className = 'tt-section'; sec.dataset.ttSection = id;
+
+            const head = document.createElement('div');
+            head.className = 'tt-sec-head';
+
+            const titleEl = document.createElement('div');
+            titleEl.className = 'tt-sec-title';
+            titleEl.innerHTML = `<span>${icon}</span><span>${title}</span>`;
+
+            if (opts.counter) {
+                this.counter = document.createElement('span');
+                this.counter.className = 'tt-sec-counter';
+                this.counter.id = `tt-counter-${id}`;
+                this.counter.style.display = 'none';
+                titleEl.appendChild(this.counter);
+            }
+
+            this.arrow = document.createElement('span');
+            this.arrow.className = 'tt-sec-arrow';
+            this.arrow.textContent = '▾';
+
+            head.append(titleEl, this.arrow);
+
+            this.body = document.createElement('div');
+            this.body.className = 'tt-sec-body';
+
+            head.onclick = () => this.setOpen(this.body.style.display === 'none');
+
+            sec.append(head, this.body);
+            this.el = sec;
         }
-        const arrow = document.createElement('span');
-        arrow.className = 'tt-sec-arrow';
-        arrow.textContent = '▾';
-        head.appendChild(titleEl);
-        head.appendChild(arrow);
-        const body = document.createElement('div');
-        body.className = 'tt-sec-body';
-        let contentBuilt = false;
-        const buildContent = () => {
-            if (contentBuilt) return;
-            const content = contentBuilder();
-            body.appendChild(content);
-            contentBuilt = true;
-        };
-        const setOpen = (open) => {
+        setOpen(open) {
             if (open) {
-                buildContent();
-                body.style.display = 'block';
-                arrow.textContent = '▾';
+                if (!this.built) { this.body.appendChild(this.contentBuilder()); this.built = true; }
+                this.body.style.display = 'block';
+                this.arrow.textContent = '▾';
             } else {
-                body.style.display = 'none';
-                arrow.textContent = '▸';
+                this.body.style.display = 'none';
+                this.arrow.textContent = '▸';
             }
-            setSectionOpen(id, open);
-        };
-        const defaultOpen = opts.defaultOpen !== false;
-        const initialOpen = isSectionOpen(id, defaultOpen);
-        setOpen(initialOpen);
-        head.onclick = () => {
-            const isOpen = body.style.display !== 'none';
-            setOpen(!isOpen);
-        };
-        section.appendChild(head);
-        section.appendChild(body);
-        return section;
-    }
-
-    function updateSectionCounter(id, value) {
-        const counter = document.getElementById(`tt-sec-counter-${id}`);
-        if (!counter) return;
-        if (value > 0) {
-            counter.textContent = value;
-            counter.style.display = 'inline-block';
-        } else {
-            counter.style.display = 'none';
+            App.accordion.set(this.id, open);
+        }
+        init() { this.setOpen(App.accordion.get(this.id, this.opts.defaultOpen !== false)); }
+        expand() { if (this.body.style.display === 'none') this.setOpen(true); }
+        setCounter(v) {
+            if (!this.counter) return;
+            this.counter.textContent = v;
+            this.counter.style.display = v > 0 ? 'inline-block' : 'none';
         }
     }
-
-    // ===== РЕСАЙЗ =====
-    const PANEL_W_KEY = 'panelWidth';
-    const PANEL_W_MIN = 240;
-    const PANEL_W_MAX = 600;
-    function getPanelWidth() {
-        const w = storage.get(PANEL_W_KEY, 260);
-        const n = parseInt(w, 10);
-        if (isNaN(n)) return 260;
-        return Math.max(PANEL_W_MIN, Math.min(PANEL_W_MAX, n));
-    }
-    function applyPanelWidth(w) {
-        w = Math.max(PANEL_W_MIN, Math.min(PANEL_W_MAX, w));
-        const panel = document.getElementById('tt-panel');
-        if (panel) panel.style.width = w + 'px';
-        document.documentElement.style.setProperty('--tt-panel-w', w + 'px');
-        return w;
-    }
-    function setupResizer(panel) {
-        const resizer = document.createElement('div');
-        resizer.id = 'tt-resizer';
-        panel.appendChild(resizer);
-        let startX = 0, startW = 0, dragging = false;
-        const onMove = (e) => {
-            if (!dragging) return;
-            const dx = startX - e.clientX;
-            const newW = startW + dx;
-            applyPanelWidth(newW);
-        };
-        const onUp = () => {
-            if (!dragging) return;
-            dragging = false;
-            resizer.classList.remove('tt-active');
-            document.documentElement.classList.remove('tt-resizing');
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-            const w = parseInt(panel.style.width, 10);
-            if (!isNaN(w)) storage.set(PANEL_W_KEY, w);
-        };
-        resizer.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            dragging = true;
-            startX = e.clientX;
-            startW = panel.offsetWidth;
-            resizer.classList.add('tt-active');
-            document.documentElement.classList.add('tt-resizing');
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
-        });
-        resizer.addEventListener('dblclick', () => {
-            applyPanelWidth(260);
-            storage.set(PANEL_W_KEY, 260);
-        });
+        /* ============================================================
+     * Accordion — состояние раскрытых секций
+     * ========================================================== */
+    class Accordion {
+        constructor(store) { this.store = store; this.KEY = 'accordionState'; }
+        all() { return this.store.get(this.KEY, {}) || {}; }
+        set(id, open) { const s = this.all(); s[id] = open; this.store.set(this.KEY, s); }
+        get(id, def) { const s = this.all(); return id in s ? s[id] : def; }
     }
 
-    // ===== ПАНЕЛЬ =====
-    let showPanel, hidePanel;
+    /* ============================================================
+     * Panel — главная боковая панель (UI)
+     * ========================================================== */
+    class Panel {
+        constructor(app) {
+            this.app = app;
+            this.sel = app.selection;
+            this.notes = app.notes;
+            this.theme = app.theme;
+            this.isProduct = Page.isProduct();
+            this.sections = {};
+            this.WMIN = 280; this.WMAX = 640; this.WDEF = 320;
+        }
 
-    function createPanel() {
-        if (document.getElementById('tt-panel') || document.getElementById('tt-rail')) return;
-        injectGlobalStyles();
+        /* --- ширина / ресайз --- */
+        width() {
+            const n = parseInt(this.app.store.get('panelWidth', this.WDEF), 10);
+            return isNaN(n) ? this.WDEF : Math.max(this.WMIN, Math.min(this.WMAX, n));
+        }
+        applyWidth(w) {
+            w = Math.max(this.WMIN, Math.min(this.WMAX, w));
+            this.panel.style.width = w + 'px';
+            document.documentElement.style.setProperty('--tt-panel-w', w + 'px');
+            return w;
+        }
+        setupResizer() {
+            const r = document.createElement('div');
+            r.id = 'tt-resizer';
+            this.panel.appendChild(r);
+            let startX = 0, startW = 0, drag = false;
+            const move = e => { if (drag) this.applyWidth(startW + (startX - e.clientX)); };
+            const up = () => {
+                if (!drag) return; drag = false;
+                r.classList.remove('tt-active');
+                document.documentElement.classList.remove('tt-resizing');
+                document.removeEventListener('mousemove', move);
+                document.removeEventListener('mouseup', up);
+                const w = parseInt(this.panel.style.width, 10);
+                if (!isNaN(w)) this.app.store.set('panelWidth', w);
+            };
+            r.addEventListener('mousedown', e => {
+                e.preventDefault(); drag = true;
+                startX = e.clientX; startW = this.panel.offsetWidth;
+                r.classList.add('tt-active');
+                document.documentElement.classList.add('tt-resizing');
+                document.addEventListener('mousemove', move);
+                document.addEventListener('mouseup', up);
+            });
+            r.addEventListener('dblclick', () => { this.applyWidth(this.WDEF); this.app.store.set('panelWidth', this.WDEF); });
+        }
 
-        const isProduct = isProductPage();
-        const initialWidth = getPanelWidth();
-        document.documentElement.style.setProperty('--tt-panel-w', initialWidth + 'px');
+        /* --- сборка DOM --- */
+        build() {
+            if (document.getElementById('tt-panel') || document.getElementById('tt-rail')) return;
+            Styles.inject();
+            document.documentElement.style.setProperty('--tt-panel-w', this.width() + 'px');
 
-        // ----- RAIL -----
-        const rail = document.createElement('div');
-        rail.id = 'tt-rail';
-        Object.assign(rail.style, {
-            position: 'fixed', top: '0', right: '0', bottom: '0',
-            zIndex: 999999, width: '48px',
-            display: 'flex', flexDirection: 'column', gap: '6px',
-            padding: '10px 8px', background: '#fff',
-            boxShadow: '-2px 0 8px rgba(0,0,0,.06)',
-            borderLeft: '1px solid #e8e8e8',
-            alignItems: 'center'
-        });
-        const mkRailBtn = (icon, title, onClick) => {
+            this.buildRail();
+            this.buildPanel();
+            this.theme.apply();
+
+            // переключатели rail / panel
+            const expanded = this.app.store.get('panelExpanded', true);
+            expanded ? this.show() : this.hide();
+
+            this.refreshAll();
+        }
+
+        rb(icon, title, onClick) {
             const b = document.createElement('button');
-            b.className = 'tt-rail-btn';
-            b.textContent = icon;
-            b.title = title;
-            b.onclick = onClick;
+            b.className = 'tt-rail-btn'; b.textContent = icon; b.title = title; b.onclick = onClick;
             return b;
-        };
-        const expandBtn = mkRailBtn('◀', 'Развернуть панель', () => showPanel());
-        rail.appendChild(expandBtn);
-        const sep = document.createElement('div');
-        Object.assign(sep.style, { width: '20px', height: '1px', background: '#e0e0e0', margin: '3px 0' });
-        rail.appendChild(sep);
-        if (isProduct) {
-            rail.appendChild(mkRailBtn('📦', 'Скачать ZIP фото', actionDownloadZip));
-            rail.appendChild(mkRailBtn('🔗', 'Копировать URL фото', actionCopyLinks));
-            rail.appendChild(mkRailBtn('📋', 'Копировать название', actionCopyName));
-            rail.appendChild(mkRailBtn('🔢', 'Копировать артикул', actionCopyArticle));
         }
-        const selBtn = mkRailBtn('🧺', 'Подборка', () => showPanel());
-        const railBadge = document.createElement('span');
-        railBadge.id = 'tt-rail-badge';
-        Object.assign(railBadge.style, {
-            position: 'absolute', top: '-3px', right: '-3px',
-            background: '#5cb85c', color: '#fff',
-            fontSize: '9px', fontWeight: 'bold',
-            padding: '1px 4px', borderRadius: '8px',
-            minWidth: '14px', textAlign: 'center', display: 'none',
-            border: '2px solid #fff', lineHeight: '1.2'
-        });
-        selBtn.appendChild(railBadge);
-        rail.appendChild(selBtn);
-        document.body.appendChild(rail);
+        buildRail() {
+            const rail = document.createElement('div');
+            rail.id = 'tt-rail';
+            rail.appendChild(this.rb('◀', 'Развернуть панель', () => this.show()));
+            const sep = document.createElement('div'); sep.className = 'tt-rail-sep'; rail.appendChild(sep);
+            if (this.isProduct) {
+                rail.appendChild(this.rb('📦', 'Скачать ZIP фото', () => Actions.downloadZip()));
+                rail.appendChild(this.rb('🔗', 'Копировать URL фото', () => Actions.copyLinks()));
+                rail.appendChild(this.rb('📋', 'Копировать название', () => Actions.copyName()));
+                rail.appendChild(this.rb('🔢', 'Копировать артикул', () => Actions.copyArticle()));
+            }
+            const selBtn = this.rb('🧺', 'Подборка', () => this.show());
+            const badge = document.createElement('span');
+            badge.id = 'tt-rail-badge';
+            selBtn.appendChild(badge);
+            rail.appendChild(selBtn);
+            document.body.appendChild(rail);
+            this.rail = rail;
+        }
 
-        // ----- ПАНЕЛЬ -----
-        const panel = document.createElement('div');
-        panel.id = 'tt-panel';
-        Object.assign(panel.style, {
-            position: 'fixed', top: '0', right: '0', bottom: '0',
-            zIndex: 999999, width: initialWidth + 'px',
-            display: 'none', flexDirection: 'column',
-            background: '#fff',
-            boxShadow: '-2px 0 12px rgba(0,0,0,.08)',
-            borderLeft: '1px solid #e8e8e8'
-        });
+        qb(icon, title, onClick) {
+            const b = document.createElement('button');
+            b.className = 'tt-quick-btn'; b.textContent = icon; b.title = title; b.onclick = onClick;
+            return b;
+        }
+        buildPanel() {
+            const panel = document.createElement('div');
+            panel.id = 'tt-panel';
+            panel.style.width = this.width() + 'px';
+            this.panel = panel;
+            this.setupResizer();
 
-        // Ресайзер
-        setupResizer(panel);
+            /* ---- Шапка ---- */
+            const header = document.createElement('div');
+            header.className = 'tt-header';
 
-        // ----- Шапка -----
-        const header = document.createElement('div');
-        Object.assign(header.style, {
-            padding: '10px 12px 8px', borderBottom: '1px solid #eee',
-            background: '#fff', position: 'sticky', top: '0', zIndex: 2
-        });
-        const headerTop = document.createElement('div');
-        Object.assign(headerTop.style, {
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            marginBottom: isProduct ? '8px' : '0'
-        });
-        const headerTitle = document.createElement('div');
-        Object.assign(headerTitle.style, {
-            fontSize: '12.5px', fontWeight: '700', color: '#333',
-            display: 'flex', alignItems: 'center', gap: '6px'
-        });
-        const titleSpan = document.createElement('span');
-        titleSpan.textContent = '🛠 Tools';
-        headerTitle.appendChild(titleSpan);
-        const headerSelCount = document.createElement('span');
-        headerSelCount.id = 'tt-header-sel-count';
-        Object.assign(headerSelCount.style, {
-            display: 'none', background: '#5cb85c', color: '#fff',
-            fontSize: '10px', fontWeight: 'bold',
-            padding: '1px 6px', borderRadius: '8px',
-            minWidth: '14px', textAlign: 'center'
-        });
-        headerTitle.appendChild(headerSelCount);
-        const closeBtn = document.createElement('button');
-        closeBtn.textContent = '▶';
-        closeBtn.title = 'Свернуть';
-        Object.assign(closeBtn.style, {
-            background: 'transparent', border: '1px solid #e0e0e0',
-            color: '#888', fontSize: '10px', cursor: 'pointer',
-            borderRadius: '4px', padding: '3px 8px',
-            fontWeight: 'bold', fontFamily: 'inherit'
-        });
-        closeBtn.onmouseenter = () => closeBtn.style.background = '#f5f5f5';
-        closeBtn.onmouseleave = () => closeBtn.style.background = 'transparent';
-        closeBtn.onclick = () => hidePanel();
-        headerTop.appendChild(headerTitle);
-        headerTop.appendChild(closeBtn);
-        header.appendChild(headerTop);
+            const top = document.createElement('div');
+            top.className = 'tt-header-top';
 
-        if (isProduct) {
-            const miniCard = document.createElement('div');
-            miniCard.id = 'tt-mini-card';
-            miniCard.className = 'tt-mini-card';
-            const miniName = document.createElement('div');
-            miniName.className = 'tt-mini-name';
-            const miniMeta = document.createElement('div');
-            miniMeta.className = 'tt-mini-meta';
-            miniCard.appendChild(miniName);
-            miniCard.appendChild(miniMeta);
-            header.appendChild(miniCard);
+            const title = document.createElement('div');
+            title.className = 'tt-title';
+            title.innerHTML = `<span>🛠</span><span>Tools</span>`;
+            const titleBadge = document.createElement('span');
+            titleBadge.id = 'tt-header-sel-count';
+            titleBadge.className = 'tt-title-badge';
+            title.appendChild(titleBadge);
 
-            const quickRow = document.createElement('div');
-            Object.assign(quickRow.style, { display: 'flex', gap: '4px', marginTop: '8px' });
-            const mkQuickBtn = (icon, title, onClick) => {
+            const ctrls = document.createElement('div');
+            ctrls.style.cssText = 'display:flex;gap:6px';
+            const themeBtn = document.createElement('button');
+            themeBtn.className = 'tt-icon-btn';
+            themeBtn.title = 'Сменить тему';
+            themeBtn.textContent = this.theme.current === 'dark' ? '☀️' : '🌙';
+            themeBtn.onclick = () => { const t = this.theme.toggle(); themeBtn.textContent = t === 'dark' ? '☀️' : '🌙'; };
+            const closeBtn = document.createElement('button');
+            closeBtn.className = 'tt-icon-btn'; closeBtn.title = 'Свернуть'; closeBtn.textContent = '▶';
+            closeBtn.onclick = () => this.hide();
+            ctrls.append(themeBtn, closeBtn);
+
+            top.append(title, ctrls);
+            header.appendChild(top);
+
+            if (this.isProduct) {
+                const card = document.createElement('div');
+                card.id = 'tt-mini-card';
+                card.className = 'tt-mini-card';
+                card.innerHTML = `<div class="tt-mini-name"></div><div class="tt-mini-meta"></div>`;
+                header.appendChild(card);
+
+                const row = document.createElement('div');
+                row.className = 'tt-quick-row';
+                row.append(
+                    this.qb('📦', 'Скачать ZIP фото', () => Actions.downloadZip()),
+                    this.qb('🔗', 'Копировать URL фото', () => Actions.copyLinks()),
+                    this.qb('📋', 'Копировать название', () => Actions.copyName()),
+                    this.qb('🔢', 'Копировать артикул', () => Actions.copyArticle()),
+                    this.qb('➕', 'В подборку', () => this.sel.addCurrent())
+                );
+                header.appendChild(row);
+            }
+            panel.appendChild(header);
+
+            /* ---- Тело ---- */
+            const body = document.createElement('div');
+            body.className = 'tt-body';
+
+            if (this.isProduct) {
+                if (Page.parseProps().length) {
+                    this.sections.props = new Section('props', '🔎', 'Характеристики',
+                        () => this.buildProps(), { defaultOpen: !Page.propsVisible() });
+                    body.appendChild(this.sections.props.el);
+                }
+                if (!isNaN(Page.priceInfo().price)) {
+                    this.sections.calc = new Section('calc', '🧮', 'Калькулятор',
+                        () => this.buildCalc(), { defaultOpen: Page.priceInfo().unitQty > 1 });
+                    body.appendChild(this.sections.calc.el);
+                }
+            }
+
+            this.sections.selection = new Section('selection', '🧺', 'Подборка',
+                () => this.buildSelection(), { defaultOpen: this.sel.all().length > 0, counter: true });
+            body.appendChild(this.sections.selection.el);
+
+            if (this.isProduct) {
+                this.sections.notes = new Section('notes', '📒', 'Заметка',
+                    () => this.buildNotes(), { defaultOpen: this.notes.has(Page.id()) });
+                body.appendChild(this.sections.notes.el);
+            }
+
+            panel.appendChild(body);
+            document.body.appendChild(panel);
+
+            // инициализация состояния секций
+            Object.values(this.sections).forEach(s => s.init());
+
+            // подписка модели подборки на изменения
+            this.sel.onChange(() => this.refreshAll());
+        }
+
+        /* --- Контент: Характеристики --- */
+        buildProps() {
+            const wrap = document.createElement('div');
+            const props = Page.parseProps();
+
+            const input = document.createElement('input');
+            input.className = 'tt-input';
+            input.placeholder = `Поиск среди ${props.length} характеристик...`;
+
+            const list = document.createElement('div');
+            list.className = 'tt-props-list';
+
+            const render = (q) => {
+                list.innerHTML = '';
+                q = (q || '').toLowerCase().trim();
+                const arr = q ? props.filter(p =>
+                    p.name.toLowerCase().includes(q) || p.value.toLowerCase().includes(q)) : props;
+                if (!arr.length) {
+                    const e = document.createElement('div');
+                    e.className = 'tt-empty'; e.textContent = 'Ничего не найдено';
+                    return list.appendChild(e);
+                }
+                arr.forEach(p => {
+                    const row = document.createElement('div');
+                    row.className = 'tt-prop-row';
+                    row.title = 'Клик — копировать значение\nShift+клик — имя: значение';
+                    row.innerHTML = `<div class="tt-prop-name"></div><div class="tt-prop-val"></div>`;
+                    row.querySelector('.tt-prop-name').textContent = p.name;
+                    row.querySelector('.tt-prop-val').textContent = p.value;
+                    row.style.background = 'transparent';
+                    row.onmouseenter = () => row.style.background = 'var(--bg-soft2)';
+                    row.onmouseleave = () => row.style.background = 'transparent';
+                    row.onclick = async e => {
+                        const t = e.shiftKey ? `${p.name}: ${p.value}` : p.value;
+                        if (await Utils.copy(t)) Utils.toast('Скопировано: ' + t.slice(0, 40));
+                    };
+                    list.appendChild(row);
+                });
+            };
+            input.addEventListener('input', () => render(input.value));
+            input.addEventListener('keydown', async e => {
+                if (e.key === 'Escape') { input.value = ''; render(''); }
+                else if (e.key === 'Enter') {
+                    const q = input.value.toLowerCase().trim(); if (!q) return;
+                    const f = props.find(p => p.name.toLowerCase().includes(q) || p.value.toLowerCase().includes(q));
+                    if (f && await Utils.copy(f.value)) Utils.toast('Скопировано: ' + f.value);
+                }
+            });
+            render('');
+            wrap.append(input, list);
+            return wrap;
+        }
+
+        /* --- Контент: Калькулятор --- */
+        buildCalc() {
+            const info = Page.priceInfo();
+            const wrap = document.createElement('div');
+            const unit = info.unit || 'ед';
+
+            const infoLine = document.createElement('div');
+            infoLine.className = 'tt-calc-info';
+            infoLine.innerHTML =
+                `<b>${Utils.money(info.price)}</b> за <b>${info.unitQty} ${unit}</b>
+                 <span class="sep">·</span>
+                 <span class="per">${Utils.money(info.pricePerUnit)}</span> / ${unit}`;
+
+            const row = document.createElement('div');
+            row.className = 'tt-calc-row';
+
+            const input = document.createElement('input');
+            input.type = 'number'; input.min = '0'; input.step = 'any';
+            input.className = 'tt-calc-input'; input.value = info.unitQty;
+
+            const lbl = document.createElement('div');
+            lbl.textContent = unit;
+            lbl.style.cssText = 'color:var(--text-soft);font-size:13px;min-width:24px';
+
+            const eq = document.createElement('div');
+            eq.textContent = '='; eq.style.cssText = 'color:var(--text-mute);font-size:15px';
+
+            const result = document.createElement('div');
+            result.className = 'tt-calc-result';
+
+            const recalc = () => {
+                const q = parseFloat((input.value || '0').replace(',', '.'));
+                result.textContent = (isNaN(q) || q < 0) ? '—' : Utils.money(info.pricePerUnit * q);
+            };
+            input.addEventListener('input', recalc);
+            recalc();
+
+            row.append(input, lbl, eq, result);
+            wrap.append(infoLine, row);
+            return wrap;
+        }
+
+        /* --- Контент: Подборка --- */
+        buildSelection() {
+            const wrap = document.createElement('div');
+
+            if (this.isProduct) {
+                this.addBtn = document.createElement('button');
+                this.addBtn.id = 'tt-sel-add';
+                this.addBtn.style.cssText = 'width:100%;text-align:center;margin-bottom:8px';
+                wrap.appendChild(this.addBtn);
+            }
+
+            const list = document.createElement('div');
+            list.id = 'tt-sel-list'; list.className = 'tt-list';
+            wrap.appendChild(list);
+
+            const actions = document.createElement('div');
+            actions.className = 'tt-sel-actions';
+
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'tt-btn primary';
+            copyBtn.textContent = '📋 Скопировать';
+            copyBtn.style.cssText = 'flex:1;text-align:center';
+            copyBtn.onclick = () => this.sel.copyText();
+
+            const exportWrap = document.createElement('div');
+            exportWrap.className = 'tt-export-wrap';
+            const exportBtn = document.createElement('button');
+            exportBtn.className = 'tt-btn'; exportBtn.textContent = '📤'; exportBtn.title = 'Экспорт';
+            const menu = document.createElement('div');
+            menu.className = 'tt-export-menu';
+            const mk = (label, fn) => {
                 const b = document.createElement('button');
-                b.className = 'tt-quick-btn';
-                b.textContent = icon;
-                b.title = title;
-                b.onclick = onClick;
+                b.className = 'tt-export-item'; b.textContent = label;
+                b.onclick = () => { menu.style.display = 'none'; fn(); };
                 return b;
             };
-            quickRow.appendChild(mkQuickBtn('📦', 'Скачать ZIP фото', actionDownloadZip));
-            quickRow.appendChild(mkQuickBtn('🔗', 'Копировать URL фото', actionCopyLinks));
-            quickRow.appendChild(mkQuickBtn('📋', 'Копировать название', actionCopyName));
-            quickRow.appendChild(mkQuickBtn('🔢', 'Копировать артикул', actionCopyArticle));
-            quickRow.appendChild(mkQuickBtn('➕', 'В подборку', addToSelection));
-            header.appendChild(quickRow);
+            menu.append(
+                mk('📄 CSV (Excel)', () => this.sel.exportCSV()),
+                mk('🔧 JSON', () => this.sel.exportJSON()),
+                mk('🔗 TXT (ссылки)', () => this.sel.exportTXT())
+            );
+            exportBtn.onclick = e => {
+                e.stopPropagation();
+                menu.style.display = menu.style.display === 'flex' ? 'none' : 'flex';
+            };
+            document.addEventListener('click', () => menu.style.display = 'none');
+            exportWrap.append(exportBtn, menu);
+
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'tt-btn danger'; clearBtn.textContent = '🗑';
+            clearBtn.onclick = () => this.sel.clear();
+
+            actions.append(copyBtn, exportWrap, clearBtn);
+            wrap.appendChild(actions);
+
+            // первичная отрисовка
+            setTimeout(() => this.renderSelection(), 0);
+            return wrap;
         }
-        panel.appendChild(header);
-
-        // ----- Контейнер секций -----
-        const body = document.createElement('div');
-        Object.assign(body.style, { flex: '1', overflowY: 'auto', padding: '4px 10px 12px' });
-
-        if (isProduct) {
-            const propsAvailable = parseProps().length > 0;
-            if (propsAvailable) {
-                body.appendChild(buildSection(
-                    'props', '🔎', 'Характеристики',
-                    buildPropsContent,
-                    { defaultOpen: !arePropsVisibleOnPage() }
-                ));
+        renderSelection() {
+            const cont = document.getElementById('tt-sel-list');
+            if (!cont) return;
+            const list = this.sel.all();
+            cont.innerHTML = '';
+            if (!list.length) {
+                const e = document.createElement('div');
+                e.className = 'tt-empty'; e.textContent = 'Подборка пуста';
+                cont.appendChild(e);
+            } else {
+                list.forEach((item, i) => {
+                    const row = document.createElement('div');
+                    row.className = 'tt-list-row';
+                    const num = document.createElement('div');
+                    num.className = 'tt-list-num'; num.textContent = (i + 1) + '.';
+                    const info = document.createElement('div');
+                    info.className = 'tt-list-info';
+                    const nm = document.createElement('a');
+                    nm.className = 'tt-list-name'; nm.href = item.url; nm.target = '_blank';
+                    nm.textContent = item.name || 'Без названия';
+                    info.appendChild(nm);
+                    if (!isNaN(item.price)) {
+                        const pr = document.createElement('div');
+                        pr.className = 'tt-list-price';
+                        pr.textContent = Utils.money(item.price) + (item.unit ? ` / ${item.unitQty} ${item.unit}` : '');
+                        info.appendChild(pr);
+                    }
+                    const del = document.createElement('button');
+                    del.className = 'tt-list-del'; del.textContent = '✕';
+                    del.onclick = () => this.sel.remove(item.id);
+                    row.append(num, info, del);
+                    cont.appendChild(row);
+                });
             }
-            const info = getPriceInfo();
-            const calcAvailable = !isNaN(info.price);
-            if (calcAvailable) {
-                body.appendChild(buildSection(
-                    'calc', '🧮', 'Калькулятор',
-                    buildCalcContent,
-                    { defaultOpen: info.unitQty > 1 }
-                ));
+            this.updateAddBtn();
+        }
+        updateAddBtn() {
+            if (!this.addBtn) return;
+            const id = Page.id();
+            if (this.sel.has(id)) {
+                this.addBtn.textContent = '✓ В подборке (убрать)';
+                this.addBtn.className = 'tt-btn muted';
+                this.addBtn.onclick = () => { this.sel.remove(id); Utils.toast('Убрано из подборки'); };
+            } else {
+                this.addBtn.textContent = '➕ Добавить в подборку';
+                this.addBtn.className = 'tt-btn success';
+                this.addBtn.onclick = () => this.sel.addCurrent();
+            }
+            this.addBtn.style.cssText = 'width:100%;text-align:center;margin-bottom:8px';
+        }
+
+        /* --- Контент: Заметка --- */
+        buildNotes() {
+            const wrap = document.createElement('div');
+            const id = Page.id();
+            const existing = this.notes.get(id);
+
+            const ta = document.createElement('textarea');
+            ta.className = 'tt-note-area';
+            ta.value = existing?.text || '';
+            ta.placeholder = 'Заметка по этому товару...';
+
+            const status = document.createElement('div');
+            status.className = 'tt-note-status';
+            const stamp = ts => '✓ ' + new Date(ts).toLocaleString('ru-RU',
+                { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            if (existing?.updatedAt) status.textContent = stamp(existing.updatedAt);
+
+            let timer = null;
+            ta.addEventListener('input', () => {
+                status.textContent = '✏ ...'; status.classList.remove('saved');
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    this.notes.save(id, ta.value);
+                    status.textContent = stamp(Date.now());
+                    status.classList.add('saved');
+                    this.updateHeaderCard();
+                }, 600);
+            });
+
+            wrap.append(ta, status);
+            return wrap;
+        }
+
+        /* --- Шапка: мини-карточка --- */
+        updateHeaderCard() {
+            const card = document.getElementById('tt-mini-card');
+            if (card) {
+                if (!this.isProduct) { card.style.display = 'none'; }
+                else {
+                    card.style.display = 'block';
+                    const info = Page.priceInfo();
+                    card.querySelector('.tt-mini-name').textContent = Page.name() || 'Товар';
+                    const meta = card.querySelector('.tt-mini-meta');
+                    const parts = [];
+                    const art = Page.article();
+                    if (art) parts.push(`<span>${art}</span>`);
+                    if (!isNaN(info.price)) parts.push(`<b>${Utils.money(info.price)}</b>`);
+                    if (this.sel.has(Page.id())) parts.push(`<span style="color:var(--green)">✓ в подборке</span>`);
+                    if (this.notes.has(Page.id())) parts.push(`<span title="Есть заметка">📒</span>`);
+                    meta.innerHTML = parts.join('<span class="sep">·</span>');
+                }
+            }
+            const hc = document.getElementById('tt-header-sel-count');
+            if (hc) {
+                const n = this.sel.all().length;
+                hc.textContent = n;
+                hc.style.display = n > 0 ? 'inline-block' : 'none';
             }
         }
 
-        // 🧺 Подборка
-        const selList = getSelection();
-        body.appendChild(buildSection(
-            'selection', '🧺', 'Подборка',
-            buildSelectionContent,
-            { defaultOpen: selList.length > 0, counter: true }
-        ));
-
-        // 🕐 История
-        body.appendChild(buildSection(
-            'history', '🕐', 'История',
-            buildHistoryContent,
-            { defaultOpen: false }
-        ));
-
-        // 📒 Заметка
-        if (isProduct) {
-            const noteOpen = hasNote(getProductId());
-            body.appendChild(buildSection(
-                'notes', '📒', 'Заметка',
-                buildNotesContent,
-                { defaultOpen: noteOpen }
-            ));
+        /* --- Бейджи + общий рефреш --- */
+        refreshAll() {
+            const n = this.sel.all().length;
+            const badge = document.getElementById('tt-rail-badge');
+            if (badge) { badge.textContent = n; badge.style.display = n > 0 ? 'inline-block' : 'none'; }
+            if (this.sections.selection) this.sections.selection.setCounter(n);
+            this.renderSelection();
+            this.updateHeaderCard();
+            this.app.catalog?.refreshCheckboxes();
         }
 
-        panel.appendChild(body);
-        document.body.appendChild(panel);
-
-        // ----- Переключение rail / panel -----
-        showPanel = function () {
-            rail.style.display = 'none';
-            panel.style.display = 'flex';
+        /* --- Показ / скрытие --- */
+        show() {
+            this.rail.style.display = 'none';
+            this.panel.style.display = 'flex';
             document.documentElement.classList.remove('tt-rail-mode');
             document.documentElement.classList.add('tt-shifted');
-            storage.set('panelExpanded', true);
-            updateHeaderCard();
-            renderSelectionList();
-            renderHistoryList();
-            updateSectionCounter('selection', getSelection().length);
-        };
-        hidePanel = function () {
-            panel.style.display = 'none';
-            rail.style.display = 'flex';
+            this.app.store.set('panelExpanded', true);
+            if (this.sel.all().length) this.sections.selection?.expand();
+            this.refreshAll();
+        }
+        hide() {
+            this.panel.style.display = 'none';
+            this.rail.style.display = 'flex';
             document.documentElement.classList.remove('tt-shifted');
             document.documentElement.classList.add('tt-rail-mode');
-            storage.set('panelExpanded', false);
-        };
-
-        const wasExpanded = storage.get('panelExpanded', true);
-        if (wasExpanded) showPanel();
-        else hidePanel();
-
-        updateHeaderCard();
-        renderSelectionList();
-        renderHistoryList();
-        updateAllBadges();
-        updateSectionCounter('selection', getSelection().length);
+            this.app.store.set('panelExpanded', false);
+        }
     }
 
-    // ===== НАБЛЮДЕНИЕ ЗА КАТАЛОГОМ =====
-    let catalogObserver = null;
-    function setupCatalogWatch() {
-        if (!shouldEnableCatalogMode()) return;
-        createCatalogToolbar();
-        injectCatalogCheckboxes();
-        if (catalogObserver) catalogObserver.disconnect();
-        // Перерисовываем при подгрузке (бесконечный скролл и т.п.)
-        catalogObserver = new MutationObserver(() => {
-            clearTimeout(window._ttCatalogTimer);
-            window._ttCatalogTimer = setTimeout(() => {
-                injectCatalogCheckboxes();
-            }, 300);
-        });
-        catalogObserver.observe(document.body, { childList: true, subtree: true });
+    /* ============================================================
+     * Catalog — режим каталога (чекбоксы на карточках + тулбар)
+     * ========================================================== */
+    class Catalog {
+        constructor(app) {
+            this.app = app; this.sel = app.selection; this.observer = null; this.timer = null;
+        }
+        findCards() {
+            const links = Array.from(document.querySelectorAll('a[href*="/product/"]'));
+            const cards = new Map();
+            for (const a of links) {
+                let host = a;
+                for (let i = 0; i < 6 && host.parentElement; i++) {
+                    if (host.querySelector('img')) break;
+                    host = host.parentElement;
+                }
+                                if (!host.querySelector('img')) continue;
+                const r = host.getBoundingClientRect();
+                if (r.width < 80 || r.height < 80 || cards.has(host)) continue;
+                const url = a.href.split('?')[0].split('#')[0];
+                let name = (a.innerText || '').trim();
+                if (!name) name = (host.querySelector('img')?.alt || '').trim();
+                cards.set(host, { url, name });
+            }
+            return Array.from(cards.entries()).map(([el, d]) => ({ el, ...d }));
+        }
+        shouldEnable() { return !Page.isProduct() && this.findCards().length >= 3; }
+        makeId(url) {
+            try {
+                const parts = new URL(url).pathname.split('/').filter(Boolean);
+                return parts[parts.length - 1] || url;
+            } catch { return url; }
+        }
+
+        watch() {
+            if (!this.shouldEnable()) return;
+            this.buildToolbar();
+            this.inject();
+            if (this.observer) this.observer.disconnect();
+            this.observer = new MutationObserver(() => {
+                clearTimeout(this.timer);
+                this.timer = setTimeout(() => this.inject(), 300);
+            });
+            this.observer.observe(document.body, { childList: true, subtree: true });
+        }
+
+        inject() {
+            if (!this.shouldEnable()) return;
+            const cards = this.findCards();
+            const sel = this.sel.all();
+            cards.forEach(card => {
+                if (card.el.querySelector('.tt-catalog-cb')) return;
+                const id = this.makeId(card.url);
+                const cb = document.createElement('div');
+                cb.className = 'tt-catalog-cb';
+                cb.dataset.ttId = id;
+                cb.dataset.ttUrl = card.url;
+                cb.dataset.ttName = card.name;
+                cb.title = 'Добавить/убрать из подборки';
+                if (sel.some(x => x.id === id)) { cb.classList.add('tt-cb-checked'); cb.textContent = '✓'; }
+                cb.onclick = e => {
+                    e.preventDefault(); e.stopPropagation();
+                    this.toggle(cb);
+                };
+                if (getComputedStyle(card.el).position === 'static') card.el.style.position = 'relative';
+                card.el.appendChild(cb);
+            });
+            this.updateToolbar();
+        }
+
+        toggle(cb) {
+            this.sel.toggle({
+                id: cb.dataset.ttId, name: cb.dataset.ttName || 'Товар', article: '',
+                url: cb.dataset.ttUrl, photo: '', price: NaN, unitQty: 1, unit: '', addedAt: Date.now()
+            });
+        }
+        selectAll() {
+            const cbs = Array.from(document.querySelectorAll('.tt-catalog-cb:not(.tt-cb-checked)'));
+            if (!cbs.length) return Utils.toast('Все уже выбраны');
+            const list = this.sel.all();
+            cbs.forEach(cb => {
+                if (list.some(x => x.id === cb.dataset.ttId)) return;
+                list.push({
+                    id: cb.dataset.ttId, name: cb.dataset.ttName || 'Товар', article: '',
+                    url: cb.dataset.ttUrl, photo: '', price: NaN, unitQty: 1, unit: '', addedAt: Date.now()
+                });
+            });
+            this.sel.save(list);
+            Utils.toast(`Добавлено: ${cbs.length}`);
+        }
+        deselectAll() {
+            const cbs = Array.from(document.querySelectorAll('.tt-catalog-cb.tt-cb-checked'));
+            if (!cbs.length) return;
+            const ids = new Set(cbs.map(c => c.dataset.ttId));
+            this.sel.save(this.sel.all().filter(x => !ids.has(x.id)));
+            Utils.toast(`Снято: ${cbs.length}`);
+        }
+
+        refreshCheckboxes() {
+            const sel = this.sel.all();
+            document.querySelectorAll('.tt-catalog-cb').forEach(cb => {
+                const inSel = sel.some(x => x.id === cb.dataset.ttId);
+                cb.classList.toggle('tt-cb-checked', inSel);
+                cb.textContent = inSel ? '✓' : '';
+            });
+            this.updateToolbar();
+        }
+
+        buildToolbar() {
+            if (document.getElementById('tt-cat-toolbar')) return;
+            const tb = document.createElement('div');
+            tb.id = 'tt-cat-toolbar';
+            const label = document.createElement('div');
+            label.innerHTML = 'Выбрано: <b class="tt-cat-count">0</b>';
+            const selAll = document.createElement('button');
+            selAll.className = 'tt-btn primary'; selAll.textContent = '☑ Все';
+            selAll.style.cssText = 'padding:7px 12px;font-size:12.5px';
+            selAll.onclick = () => this.selectAll();
+            const desAll = document.createElement('button');
+            desAll.className = 'tt-btn'; desAll.textContent = '☐ Снять';
+            desAll.style.cssText = 'padding:7px 12px;font-size:12.5px';
+            desAll.onclick = () => this.deselectAll();
+            tb.append(label, selAll, desAll);
+            document.body.appendChild(tb);
+        }
+        updateToolbar() {
+            const tb = document.getElementById('tt-cat-toolbar');
+            if (!tb) return;
+            const checked = document.querySelectorAll('.tt-catalog-cb.tt-cb-checked').length;
+            const total = document.querySelectorAll('.tt-catalog-cb').length;
+            const cnt = tb.querySelector('.tt-cat-count');
+            if (cnt) cnt.textContent = checked;
+            tb.style.display = total > 0 ? 'flex' : 'none';
+        }
     }
 
-    // ===== ЗАПУСК =====
-    function tryInit() {
-        createPanel();
-        pushHistory();
-        setupCatalogWatch();
+    /* ============================================================
+     * App — корневой объект приложения (точка входа)
+     * ========================================================== */
+    class App {
+        constructor() {
+            App.instance = this;
+            this.store = new Store();
+            this.selection = new Selection(this.store);
+            this.notes = new Notes(this.store);
+            this.theme = new Theme(this.store);
+            this.accordion = new Accordion(this.store);
+            this.panel = new Panel(this);
+            this.catalog = new Catalog(this);
+        }
+        init() {
+            this.panel.build();
+            this.catalog.watch();
+        }
+        static get accordion() { return App.instance.accordion; }
     }
-    tryInit();
-    setTimeout(tryInit, 1500);
-    setTimeout(tryInit, 4000);
+
+    /* ============================================================
+     * Запуск (с повторами для динамической загрузки)
+     * ========================================================== */
+    let app = null;
+    function boot() {
+        if (!app) { app = new App(); app.init(); }
+        else app.catalog.watch();
+    }
+    boot();
+    setTimeout(boot, 1500);
+    setTimeout(boot, 4000);
 })();
