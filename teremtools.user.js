@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Teremonline - Product Tools
 // @namespace    teremtools
-// @version      9.0
+// @version      9.5
 // @description  Инструменты для teremonline.ru: панель, подборка, каталог-режим, ресайз, экспорт, темы (ООП)
 // @match        *://teremonline.ru/*
 // @match        *://*.teremonline.ru/*
@@ -13,7 +13,7 @@
 
 (function () {
     'use strict';
-    console.log('[TeremTools] v9.0 (OOP) запустился');
+    console.log('[TeremTools] v9.5 (OOP) запустился');
 
     /* ============================================================
      * Store — обёртка над хранилищем (GM / localStorage)
@@ -42,22 +42,41 @@
     /* ============================================================
      * Page — извлечение данных со страницы товара/каталога
      * ========================================================== */
+        /* ============================================================
+     * Page — извлечение данных со страницы товара/каталога
+     * ========================================================== */
     class Page {
-        static isProduct() { return location.pathname.includes('/product/'); }
-        static cleanUrl()  { return location.origin + location.pathname; }
-        static id()        { return Page.article() || location.pathname; }
+        static isProduct(doc = document) {
+            const path = doc === document ? location.pathname : (doc._ttPath || '');
+            return path.includes('/product/');
+        }
+        static cleanUrl(url = location.href) {
+            try { const u = new URL(url); return u.origin + u.pathname; }
+            catch { return location.origin + location.pathname; }
+        }
+        static id(doc = document, url) {
+            return Page.article(doc) || (url ? new URL(url).pathname : location.pathname);
+        }
 
-        static article() {
-            const m = document.body.innerText.match(/Арт[\.\s]*:?\s*([A-Za-z0-9][A-Za-z0-9\-_]*)/i);
-            return m ? m[1].trim() : null;
+                        static article(doc = document) {
+            const text = doc.body.innerText;
+            // артикул после "Арт:" — может содержать пробелы, /, ", -
+            const m = text.match(/Арт[\.\s]*:?\s*([A-Za-z0-9][A-Za-z0-9\-_\/" ]*?)\s*(?:\n|$|копировать|Код товара|Бренд)/i);
+            if (m) {
+                let art = m[1].trim().replace(/\s{2,}/g, ' ').replace(/копировать$/i, '').trim();
+                if (art && art.length <= 40) return art;
+            }
+            const m2 = text.match(/Арт[\.\s]*:?\s*([A-Za-z0-9][A-Za-z0-9\-_\/"]*)/i);
+            return m2 ? m2[1].trim() : null;
         }
         static articleOrAsk() {
             return Page.article() || prompt('Артикул не найден. Введи вручную:', 'product') || 'product';
         }
-        static name() {
-            const h1 = document.querySelector('h1');
+        static name(doc = document) {
+            const h1 = doc.querySelector('h1');
             if (h1 && h1.innerText.trim()) return h1.innerText.trim();
-            return (document.title || '').replace(/\s*[\|\-–—]\s*Teremonline.*$/i, '').trim();
+            const title = doc === document ? document.title : (doc._ttTitle || '');
+            return (title || '').replace(/\s*[\|\-–—]\s*Teremonline.*$/i, '').trim();
         }
 
         static normalizeUnit(raw) {
@@ -78,8 +97,8 @@
             const m = s.replace(/\s|&nbsp;/g, '').replace(',', '.').match(/-?\d+(\.\d+)?/);
             return m ? parseFloat(m[0]) : NaN;
         }
-        static priceInfo() {
-            const t = document.body.innerText;
+        static priceInfo(doc = document) {
+            const t = doc.body.innerText;
             let price = NaN;
             const pm = t.match(/цена\s*:?\s*([\d\s.,]+)\s*руб/i);
             if (pm) price = Page.parseNumber(pm[1]);
@@ -97,8 +116,8 @@
             return { price, unitQty, unit, pricePerUnit };
         }
 
-        static parseProps() {
-            const cont = document.querySelector('.catalog-product-detail__props');
+        static parseProps(doc = document) {
+            const cont = doc.querySelector('.catalog-product-detail__props');
             if (!cont) return [];
             const dts = cont.querySelectorAll('dt');
             const dds = cont.querySelectorAll('dd');
@@ -110,12 +129,33 @@
             }
             return out;
         }
+                static vendorCode(doc = document) {
+            const props = Page.parseProps(doc);
+            // ищем по типичным названиям характеристики
+            const re = /(артикул\s*производ|код\s*производ|артикул\s*бренда|vendor|производ.*артикул)/i;
+            for (const p of props) {
+                if (re.test(p.name)) {
+                    const v = (p.value || '').trim();
+                    if (v) return v;
+                }
+            }
+            // запасной вариант — просто "Артикул" в характеристиках
+            for (const p of props) {
+                if (/^артикул$/i.test(p.name.trim())) {
+                    const v = (p.value || '').trim();
+                    if (v) return v;
+                }
+            }
+            return null;
+        }
         static propsVisible() {
             const cont = document.querySelector('.catalog-product-detail__props');
             return cont ? cont.getBoundingClientRect().height > 50 : false;
         }
 
-        static toAbsolute(url) { try { return new URL(url, location.href).href; } catch { return url; } }
+        static toAbsolute(url, base = location.href) {
+            try { return new URL(url, base).href; } catch { return url; }
+        }
         static upscale(url) {
             return url.replace(/(_|\/|-)(\d{2,4})x(\d{2,4})(?=[._\/])/g, (m, s) => `${s}1600x1600`);
         }
@@ -129,40 +169,189 @@
             }
             return best;
         }
-        static collectPhotos() {
+        static collectPhotos(doc = document, base = location.href) {
             const res = [], seen = new Set();
             const push = (url) => {
                 if (!url) return;
-                const abs = Page.toAbsolute(url);
+                const abs = Page.toAbsolute(url, base);
                 let key = abs;
                 try { const u = new URL(abs); key = u.origin + u.pathname; } catch {}
                 if (seen.has(key)) return;
                 seen.add(key); res.push(abs);
             };
-            const links = document.querySelectorAll('a[data-fancybox*="gallery"][data-src]');
+            const links = doc.querySelectorAll('a[data-fancybox*="gallery"][data-src]');
             for (const a of links) {
                 if (a.closest('.splide__slide--clone')) continue;
                 push(a.getAttribute('data-src'));
             }
             if (res.length) return res;
 
-            const mainList = document.querySelector('#slider-product-main-list, #slider-product-main');
+            const mainList = doc.querySelector('#slider-product-main-list, #slider-product-main');
             if (mainList) {
                 for (const slide of mainList.querySelectorAll('li.splide__slide:not(.splide__slide--clone)')) {
                     const a = slide.querySelector('a[data-src]');
                     if (a) { push(a.getAttribute('data-src')); continue; }
                     const img = slide.querySelector('img');
-                    if (img) push(Page.upscale(img.currentSrc || img.src));
+                    if (img) push(Page.upscale(img.getAttribute('data-src') || img.src));
                 }
                 if (res.length) return res;
+            }
+            // для удалённого документа naturalWidth недоступен — берём первое подходящее фото
+            if (doc !== document) {
+                const img = doc.querySelector('.catalog-product-detail img, img[itemprop="image"], .product img');
+                if (img) push(Page.upscale(img.getAttribute('data-src') || img.getAttribute('src')));
+                return res;
             }
             const main = Page.findMainImage();
             if (main) push(Page.upscale(main.currentSrc || main.src));
             return res;
         }
-        static mainPhoto() { return Page.collectPhotos()[0] || null; }
+        static mainPhoto(doc = document, base = location.href) {
+            return Page.collectPhotos(doc, base)[0] || null;
+        }
+    }
+    /* ============================================================
+ * Fetcher — поиск через скрытый iframe (JS-рендеринг DigiSearch)
+ * ========================================================== */
+class Fetcher {
+    static async loadDoc(url) {
+        const res = await fetch(url, { credentials: 'include' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        doc._ttPath = (() => { try { return new URL(url).pathname; } catch { return ''; } })();
+        doc._ttTitle = doc.querySelector('title')?.textContent || '';
+        return doc;
     }
 
+    // Грузим URL поиска в скрытый iframe и ждём появления карточек товара
+    static loadInIframe(url, { timeout = 20000, ready } = {}) {
+        return new Promise((resolve, reject) => {
+            const iframe = document.createElement('iframe');
+            iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1200px;height:1400px;opacity:0;pointer-events:none;border:0;';
+            let done = false;
+            let poll = null;
+            const cleanup = () => {
+                if (poll) clearInterval(poll);
+                if (iframe.parentNode) iframe.remove();
+            };
+            const finish = (doc) => { if (done) return; done = true; cleanup(); resolve(doc); };
+            const fail = (e) => { if (done) return; done = true; cleanup(); reject(e); };
+
+            const to = setTimeout(() => {
+                // по таймауту — отдаём что есть (вдруг отрендерилось без сигнала)
+                try { finish(iframe.contentDocument); } catch (e) { fail(new Error('timeout')); }
+            }, timeout);
+
+            iframe.addEventListener('load', () => {
+                let doc;
+                try { doc = iframe.contentDocument; }
+                catch (e) { clearTimeout(to); return fail(new Error('cross-origin iframe')); }
+                if (!doc) { clearTimeout(to); return fail(new Error('no iframe doc')); }
+
+                // ждём, пока JS отрендерит результаты
+                poll = setInterval(() => {
+                    try {
+                        if (ready(doc)) { clearTimeout(to); finish(doc); }
+                    } catch (e) { /* still loading */ }
+                }, 300);
+            });
+
+            iframe.src = url;
+            document.body.appendChild(iframe);
+        });
+    }
+
+    // Ссылка на товар по расширенному артикулу
+    static async findProductUrl(query) {
+        const q = encodeURIComponent(query.trim());
+        const searchUrl = `${location.origin}/?digiSearch=true&term=${q}&params=%7Csort%3DDEFAULT`;
+
+        const doc = await Fetcher.loadInIframe(searchUrl, {
+            timeout: 20000,
+            ready: (d) => !!Fetcher.extractFromDoc(d)
+        });
+
+        const link = Fetcher.extractFromDoc(doc);
+        if (!link) throw new Error('Товар не найден в результатах');
+        return Page.toAbsolute(link, searchUrl);
+    }
+
+    // Достаём ссылку на товар из отрендеренного результата поиска
+    static extractFromDoc(doc) {
+        const selectors = [
+            '.catalog-section .catalog-item a[href*="/product/"]',
+            '.catalog-item a[href*="/product/"]',
+            '.product-item a[href*="/product/"]',
+            '.digi-product a[href*="/product/"]',
+            'a.catalog-item__name[href*="/product/"]',
+            'a[href*="/product/"]'
+        ];
+        for (const sel of selectors) {
+            const list = doc.querySelectorAll(sel);
+            for (const a of list) {
+                const href = a.getAttribute('href');
+                // отсекаем шапку/футер/рекомендации
+                if (href && href.includes('/product/') && !a.closest('header, footer, .header, .footer')) {
+                    return href;
+                }
+            }
+        }
+        return null;
+    }
+
+    // Полный цикл: артикул -> данные товара
+    static async getProductByArticle(query) {
+        const url = await Fetcher.findProductUrl(query);
+        if (!url) throw new Error('Товар не найден');
+
+        const doc = await Fetcher.loadDoc(url);
+        const info = Page.priceInfo(doc);
+                return {
+            id: Page.article(doc) || new URL(url).pathname.split('/').filter(Boolean).pop(),
+            name: Page.name(doc),
+            article: Page.article(doc) || '',
+            vendorCode: Page.vendorCode(doc) || '',
+            url: Page.cleanUrl(url),
+            photo: Page.mainPhoto(doc, url) || '',
+            price: info.price,
+            unitQty: info.unitQty,
+            unit: info.unit || '',
+            props: Page.parseProps(doc),
+            addedAt: Date.now()
+        };
+    }
+        // Массовый поиск: принимает строку с артикулами (через пробел/перенос/запятую)
+    // onProgress(current, total, article, status) — колбэк для UI
+    static async getProductsBatch(rawText, onProgress) {
+        const articles = Fetcher.parseArticles(rawText);
+        const results = { ok: [], failed: [] };
+
+        for (let i = 0; i < articles.length; i++) {
+            const art = articles[i];
+            onProgress?.(i + 1, articles.length, art, 'searching');
+            try {
+                const product = await Fetcher.getProductByArticle(art);
+                results.ok.push(product);
+                onProgress?.(i + 1, articles.length, art, 'ok');
+            } catch (e) {
+                results.failed.push({ article: art, error: e.message });
+                onProgress?.(i + 1, articles.length, art, 'fail');
+            }
+        }
+        return results;
+    }
+
+    // Разбор строки на массив артикулов (пробел, перенос, запятая, табуляция, ;)
+    static parseArticles(text) {
+        return (text || '')
+            .split(/[\s,;]+/)
+            .map(s => s.trim())
+            .filter(Boolean)
+            // убираем дубли, сохраняя порядок
+            .filter((v, i, arr) => arr.indexOf(v) === i);
+    }
+}
     /* ============================================================
      * Utils — общие функции (деньги, toast, clipboard, скачивание)
      * ========================================================== */
@@ -312,6 +501,80 @@
                 setTimeout(() => { st.classList.remove('show'); setTimeout(() => st.remove(), 300); }, 3000);
             }
         },
+                async downloadSelectionZip(list) {
+            if (!list || !list.length) return Utils.toast('Подборка пуста', 'err');
+
+            const st = document.createElement('div');
+            st.className = 'tt-toast progress show';
+            st.textContent = '⏳ Подготовка...';
+            document.body.appendChild(st);
+
+            const files = [];
+            const usedNames = {};
+            let okItems = 0, totalPhotos = 0;
+
+            try {
+                for (let i = 0; i < list.length; i++) {
+                    const item = list[i];
+                    // имя папки: артикул производителя -> расширенный -> id
+                    let folderBase = (item.vendorCode || item.article || item.id || 'product')
+                        .replace(/[<>:"/\\|?*]/g, '_').trim();
+                    if (!folderBase) folderBase = 'product';
+                    // защита от дублей имён папок
+                    if (usedNames[folderBase] != null) {
+                        usedNames[folderBase]++;
+                        folderBase = `${folderBase}_${usedNames[folderBase]}`;
+                    } else {
+                        usedNames[folderBase] = 0;
+                    }
+
+                    st.textContent = `⏳ Товар ${i + 1}/${list.length}: ${folderBase}`;
+
+                    // загружаем страницу товара и собираем фото
+                    let urls = [];
+                    try {
+                        const doc = await Fetcher.loadDoc(item.url);
+                        urls = Page.collectPhotos(doc, item.url);
+                    } catch (e) {
+                        console.warn('[TeremTools] не удалось открыть', item.url, e);
+                    }
+                    if (!urls.length && item.photo) urls = [item.photo];
+                    if (!urls.length) continue;
+
+                    let idx = 1;
+                    for (const u of urls) {
+                        st.textContent = `⏳ ${i + 1}/${list.length} · ${folderBase} · фото ${idx}/${urls.length}`;
+                        try {
+                            const ctrl = new AbortController();
+                            const to = setTimeout(() => ctrl.abort(), 20000);
+                            const res = await fetch(u, { credentials: 'include', signal: ctrl.signal });
+                            clearTimeout(to);
+                            if (!res.ok) throw 0;
+                            const src = await res.blob();
+                            let out; try { out = await Utils.blobToJpg(src); } catch { out = src; }
+                            files.push({ name: `${folderBase}/${folderBase}_${idx}.jpg`, data: await Utils.blobToU8(out) });
+                            totalPhotos++;
+                        } catch (e) {
+                            console.warn('[TeremTools] фото', u, e);
+                        }
+                        idx++;
+                    }
+                    okItems++;
+                }
+
+                if (!files.length) throw new Error('Не удалось скачать ни одного фото');
+                st.textContent = '📦 Собираю архив...';
+                await new Promise(r => setTimeout(r, 50));
+                Utils.download(Zip.build(files), `selection_photos_${Date.now()}.zip`);
+                st.className = 'tt-toast ok show';
+                st.textContent = `✓ Готово: ${totalPhotos} фото из ${okItems} товаров`;
+            } catch (e) {
+                st.className = 'tt-toast err show';
+                st.textContent = '❌ ' + e.message;
+            } finally {
+                setTimeout(() => { st.classList.remove('show'); setTimeout(() => st.remove(), 300); }, 3500);
+            }
+        },
         async copyLinks() {
             const urls = Page.collectPhotos();
             if (!urls.length) return alert('Нет фото в карусели.');
@@ -346,8 +609,9 @@
             if (this.has(id)) return Utils.toast('Уже в подборке', 'err');
             const info = Page.priceInfo();
             const list = this.all();
-            list.push({
+                        list.push({
                 id, name: Page.name(), article: Page.article() || '',
+                vendorCode: Page.vendorCode() || '',
                 url: Page.cleanUrl(), photo: Page.mainPhoto() || '',
                 price: info.price, unitQty: info.unitQty, unit: info.unit || '', addedAt: Date.now()
             });
@@ -925,7 +1189,7 @@
             b.className = 'tt-quick-btn'; b.textContent = icon; b.title = title; b.onclick = onClick;
             return b;
         }
-        buildPanel() {
+                buildPanel() {
             const panel = document.createElement('div');
             panel.id = 'tt-panel';
             panel.style.width = this.width() + 'px';
@@ -986,6 +1250,11 @@
             const body = document.createElement('div');
             body.className = 'tt-body';
 
+            // Секция поиска по артикулу (вверху тела)
+            this.sections.lookup = new Section('lookup', '🔍', 'Поиск по артикулу',
+                () => this.buildLookup(), { defaultOpen: false });
+            body.appendChild(this.sections.lookup.el);
+
             if (this.isProduct) {
                 if (Page.parseProps().length) {
                     this.sections.props = new Section('props', '🔎', 'Характеристики',
@@ -1018,7 +1287,106 @@
             // подписка модели подборки на изменения
             this.sel.onChange(() => this.refreshAll());
         }
+                /* --- Контент: Поиск по артикулу --- */
+                /* --- Контент: Поиск по артикулу --- */
+        buildLookup() {
+            const wrap = document.createElement('div');
 
+            const hint = document.createElement('div');
+            hint.style.cssText = 'color:var(--text-soft);font-size:12px;margin-bottom:8px;line-height:1.4';
+            hint.textContent = 'Введите один или несколько артикулов (через пробел, запятую или с новой строки). Скрипт найдёт все товары и добавит в подборку.';
+            wrap.appendChild(hint);
+
+            const input = document.createElement('textarea');
+            input.className = 'tt-input';
+            input.placeholder = 'RG00934TDT2Q1F RG00934TDT309H ...';
+            input.style.cssText = 'min-height:60px;resize:vertical;font-family:inherit';
+            wrap.appendChild(input);
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+
+            const findBtn = document.createElement('button');
+            findBtn.className = 'tt-btn primary';
+            findBtn.style.cssText = 'flex:1;text-align:center';
+            findBtn.textContent = '🔍 Найти и добавить';
+
+            btnRow.append(findBtn);
+            wrap.appendChild(btnRow);
+
+            const result = document.createElement('div');
+            result.style.cssText = 'margin-top:10px;font-size:13px';
+            wrap.appendChild(result);
+
+            // Один артикул
+            const runOne = async (query) => {
+                findBtn.disabled = true;
+                result.innerHTML = `<div style="color:var(--text-soft)">⏳ Ищу «${query}»...</div>`;
+                try {
+                    const item = await Fetcher.getProductByArticle(query);
+                    this.sel.addRaw(item);
+                    result.innerHTML = `
+                        <div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px">
+                            <div style="font-weight:700;color:var(--text);margin-bottom:4px">${item.name || 'Товар'}</div>
+                            <div style="color:var(--green);font-size:13px">${!isNaN(item.price) ? Utils.money(item.price) : 'Цена не найдена'}${item.unit ? ' / ' + item.unitQty + ' ' + item.unit : ''}</div>
+                            <div style="color:var(--text-soft);font-size:12px;margin-top:3px">Арт.: ${item.article || '—'} · хар-к: ${item.props ? item.props.length : 0}</div>
+                            <a href="${item.url}" target="_blank" style="color:var(--link);font-size:12px">Открыть карточку</a>
+                        </div>`;
+                    Utils.toast('✓ Добавлено: ' + (item.name || query));
+                    input.value = '';
+                } catch (e) {
+                    result.innerHTML = `<div style="color:var(--danger)">❌ ${e.message}</div>`;
+                    Utils.toast('Не найдено: ' + query, 'err');
+                } finally {
+                    findBtn.disabled = false;
+                }
+            };
+
+            // Несколько артикулов
+            const runMany = async (list) => {
+                findBtn.disabled = true;
+                const ok = [], fail = [];
+                for (let i = 0; i < list.length; i++) {
+                    result.innerHTML = `<div style="color:var(--text-soft)">⏳ ${i + 1}/${list.length}: ${list[i]}</div>`;
+                    try {
+                        const item = await Fetcher.getProductByArticle(list[i]);
+                        this.sel.addRaw(item);
+                        ok.push(list[i]);
+                    } catch {
+                        fail.push(list[i]);
+                    }
+                    await new Promise(r => setTimeout(r, 400));
+                }
+                let html = `<div style="color:var(--green)">✓ Добавлено: <b>${ok.length}</b> из ${list.length}</div>`;
+                if (fail.length) {
+                    html += `<div style="color:var(--danger);margin-top:6px">❌ Не найдено (${fail.length}):<br>` +
+                        fail.map(a => '• ' + a).join('<br>') + '</div>';
+                }
+                result.innerHTML = html;
+                Utils.toast(`Готово: ${ok.length} добавлено${fail.length ? `, ${fail.length} не найдено` : ''}`);
+                if (!fail.length) input.value = '';
+                findBtn.disabled = false;
+            };
+
+            // Главный обработчик: сам решает один это артикул или много
+            const run = () => {
+                const list = Fetcher.parseArticles(input.value);
+                if (!list.length) return Utils.toast('Введите артикул', 'err');
+                if (list.length === 1) runOne(list[0]);
+                else runMany(list);
+            };
+
+            findBtn.onclick = run;
+            // Ctrl+Enter или Enter (без Shift) — запуск; Shift+Enter — перенос строки
+            input.addEventListener('keydown', e => {
+                if (e.key === 'Enter' && (e.ctrlKey || !e.shiftKey)) {
+                    e.preventDefault();
+                    run();
+                }
+            });
+
+            return wrap;
+        }
         /* --- Контент: Характеристики --- */
         buildProps() {
             const wrap = document.createElement('div');
@@ -1162,11 +1530,15 @@
             document.addEventListener('click', () => menu.style.display = 'none');
             exportWrap.append(exportBtn, menu);
 
+                        const zipBtn = document.createElement('button');
+            zipBtn.className = 'tt-btn'; zipBtn.textContent = '📦'; zipBtn.title = 'Скачать фото всех товаров (ZIP)';
+            zipBtn.onclick = () => Actions.downloadSelectionZip(this.sel.all());
+
             const clearBtn = document.createElement('button');
             clearBtn.className = 'tt-btn danger'; clearBtn.textContent = '🗑';
             clearBtn.onclick = () => this.sel.clear();
 
-            actions.append(copyBtn, exportWrap, clearBtn);
+            actions.append(copyBtn, exportWrap, zipBtn, clearBtn);
             wrap.appendChild(actions);
 
             // первичная отрисовка
@@ -1321,22 +1693,42 @@
         constructor(app) {
             this.app = app; this.sel = app.selection; this.observer = null; this.timer = null;
         }
-        findCards() {
+                        findCards() {
             const links = Array.from(document.querySelectorAll('a[href*="/product/"]'));
             const cards = new Map();
+            const seenUrls = new Set();
             for (const a of links) {
                 let host = a;
                 for (let i = 0; i < 6 && host.parentElement; i++) {
                     if (host.querySelector('img')) break;
                     host = host.parentElement;
                 }
-                                if (!host.querySelector('img')) continue;
+                if (!host.querySelector('img')) continue;
                 const r = host.getBoundingClientRect();
                 if (r.width < 80 || r.height < 80 || cards.has(host)) continue;
+
                 const url = a.href.split('?')[0].split('#')[0];
-                let name = (a.innerText || '').trim();
+                if (seenUrls.has(url)) continue;
+                seenUrls.add(url);
+
+                                let name = (a.innerText || '').trim();
                 if (!name) name = (host.querySelector('img')?.alt || '').trim();
-                cards.set(host, { url, name });
+
+                                // парсим цену прямо из карточки каталога
+                let price = NaN;
+                {
+                    // нормализуем все пробелы (вкл. неразрывный) в обычные
+                    const raw = (host.innerText || '').replace(/[\u00A0\u202F\u2009]/g, ' ');
+                    // ищем число перед "руб" / "₽" / "р."
+                    const m = raw.match(/([\d]{1,3}(?:[ \d]{0,12})?(?:[.,]\d{1,2})?)\s*(?:руб|₽|р\.)/i);
+                    if (m) {
+                        // убираем пробелы-разделители тысяч, запятую -> точка
+                        const num = parseFloat(m[1].replace(/\s/g, '').replace(',', '.'));
+                        if (!isNaN(num)) price = num;
+                    }
+                }
+
+                cards.set(host, { url, name, price });
             }
             return Array.from(cards.entries()).map(([el, d]) => ({ el, ...d }));
         }
@@ -1353,25 +1745,57 @@
             this.buildToolbar();
             this.inject();
             if (this.observer) this.observer.disconnect();
-            this.observer = new MutationObserver(() => {
-                clearTimeout(this.timer);
-                this.timer = setTimeout(() => this.inject(), 300);
+                                    this.observer = new MutationObserver((mutations) => {
+                // игнорируем собственные изменения (добавление/удаление чекбоксов)
+                const onlyOurs = mutations.every(m =>
+                    [...m.addedNodes, ...m.removedNodes].every(n =>
+                        n.nodeType === 1 && n.classList?.contains('tt-catalog-cb')));
+                if (onlyOurs) return;
+
+                // мгновенно, но через rAF — не блокирует и схлопывает пачку мутаций в один вызов
+                if (this._scheduled) return;
+                this._scheduled = true;
+                requestAnimationFrame(() => {
+                    this._scheduled = false;
+                    this.inject();
+                });
             });
             this.observer.observe(document.body, { childList: true, subtree: true });
         }
 
-        inject() {
+                inject() {
             if (!this.shouldEnable()) return;
+
+            // 1. Глобально убираем дубли: один URL — один чекбокс
+            const byUrl = {};
+            document.querySelectorAll('.tt-catalog-cb').forEach(cb => {
+                const u = cb.dataset.ttUrl;
+                if (!u) return;
+                if (byUrl[u]) { cb.remove(); }   // дубль — удаляем
+                else byUrl[u] = cb;
+            });
+
+            // 2. Чистим "осиротевшие" чекбоксы (карточка ушла из DOM)
+            document.querySelectorAll('.tt-catalog-cb').forEach(cb => {
+                if (!cb.isConnected || !cb.parentElement) cb.remove();
+            });
+
             const cards = this.findCards();
             const sel = this.sel.all();
+
             cards.forEach(card => {
+                const url = card.url;
+                // если для этого товара уже есть чекбокс где-либо — пропускаем
+                if (document.querySelector(`.tt-catalog-cb[data-tt-url="${CSS.escape(url)}"]`)) return;
                 if (card.el.querySelector('.tt-catalog-cb')) return;
-                const id = this.makeId(card.url);
+
+                const id = this.makeId(url);
                 const cb = document.createElement('div');
                 cb.className = 'tt-catalog-cb';
                 cb.dataset.ttId = id;
-                cb.dataset.ttUrl = card.url;
+                cb.dataset.ttUrl = url;
                 cb.dataset.ttName = card.name;
+                cb.dataset.ttPrice = isNaN(card.price) ? '' : card.price;
                 cb.title = 'Добавить/убрать из подборки';
                 if (sel.some(x => x.id === id)) { cb.classList.add('tt-cb-checked'); cb.textContent = '✓'; }
                 cb.onclick = e => {
@@ -1381,13 +1805,16 @@
                 if (getComputedStyle(card.el).position === 'static') card.el.style.position = 'relative';
                 card.el.appendChild(cb);
             });
+
             this.updateToolbar();
         }
 
-        toggle(cb) {
+                toggle(cb) {
+            const p = cb.dataset.ttPrice;
+            const price = (p === '' || p === undefined) ? NaN : parseFloat(p);
             this.sel.toggle({
                 id: cb.dataset.ttId, name: cb.dataset.ttName || 'Товар', article: '',
-                url: cb.dataset.ttUrl, photo: '', price: NaN, unitQty: 1, unit: '', addedAt: Date.now()
+                url: cb.dataset.ttUrl, photo: '', price: price, unitQty: 1, unit: '', addedAt: Date.now()
             });
         }
         selectAll() {
@@ -1464,9 +1891,34 @@
             this.panel = new Panel(this);
             this.catalog = new Catalog(this);
         }
-        init() {
+                init() {
             this.panel.build();
             this.catalog.watch();
+            this.watchUrlChange();   // ← добавить
+        }
+
+        watchUrlChange() {
+            let last = location.href;
+            const check = () => {
+                if (location.href !== last) {
+                    last = location.href;
+                    // даём странице дорендериться
+                    setTimeout(() => {
+                        this.panel.isProduct = Page.isProduct();
+                        this.panel.updateHeaderCard();
+                        this.panel.refreshAll();
+                        this.catalog.watch();
+                    }, 800);
+                }
+            };
+            // ловим pushState / replaceState / popstate
+            ['pushState', 'replaceState'].forEach(m => {
+                const orig = history[m];
+                history[m] = function () { const r = orig.apply(this, arguments); window.dispatchEvent(new Event('tt-urlchange')); return r; };
+            });
+            window.addEventListener('popstate', check);
+            window.addEventListener('tt-urlchange', check);
+            setInterval(check, 1000); // запасной поллинг
         }
         static get accordion() { return App.instance.accordion; }
     }
